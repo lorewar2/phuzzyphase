@@ -1,0 +1,63 @@
+name: phuzzy phazer
+version: "1.0"
+author: Haynes Heaton <whheaton@gmail.com>
+about: Bernoulli mixture model diploid and polyploid phasing
+args:
+    - output:
+        long: output
+        short: o
+        takes_value: true
+        required: true
+        help: output directory
+    - vcf:
+        long: vcf
+        short: v
+        takes_value: true
+        required: true
+        help: vcf file
+    - linked_read_bam:
+        long: linked_read_bam
+        short: l
+        takes_value: true
+        required: false
+        help: linked read aligned bam
+    - hic_bam:
+        long: hic_bam
+        short: h
+        takes_value: true
+        help: hic aligned bam
+    - long_read_bam:
+        long: long_read_bam
+        required: false
+        takes_value: true
+        help: long reads aligned bam
+    - threads:
+        short: t
+        long: threads
+        required: false
+        takes_value: true
+        help: max number of threads.
+    - seed:
+        short: s
+        long: seed
+        required: false
+        takes_value: true
+        help: random seed
+    - restarts:
+        long: restarts
+        required: false
+        takes_value: true
+        help: number of random restarts
+    - fasta:
+        short: f
+        long: assembly_fasta
+        required: true
+        help: assembly fasta file
+        takes_value: true
+    - ploidy:
+        short: p
+        long: ploidy
+        required: false
+        help: ploidy of organism, default 2
+        takes_value: true
+        
