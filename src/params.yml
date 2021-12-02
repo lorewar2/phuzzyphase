@@ -24,6 +24,7 @@ args:
     - hic_bam:
         long: hic_bam
         short: h
+        required: false
         takes_value: true
         help: hic aligned bam
     - long_read_bam:
