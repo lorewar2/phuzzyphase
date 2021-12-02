@@ -94,8 +94,9 @@ fn _main() -> Result<(), Error> {
 
 fn phase_chunk<'a>(data: &ThreadData) -> Result<(), Error> {
     println!("thread {} chrom {}", data.index, data.chrom);
-    for i in 0..1000000 {
-        eprintln!("{}", i);
+    for i in 0..100000000 {
+        //eprintln!("{}", i);
+        let b = i*i;
     }
     let long_read_bam_reader = match &data.long_read_bam {
         Some(x) => Some(bam::IndexedReader::from_path(x)?),
