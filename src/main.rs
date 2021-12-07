@@ -127,7 +127,6 @@ fn get_molecule_alleles_assignments(data: &ThreadData) -> Result<MoleculeAlleles
         }
         let genotypes = rec.genotypes()?;
         let genotype = genotypes.get(0); // assume only 1 and get the first one
-        println!("{:?}", genotype);
         if is_heterozygous(genotype) {
             hets += 1;
             let molecule_assignments = get_molecule_allele_assignments(
@@ -162,25 +161,20 @@ fn is_heterozygous(gt: bcf::record::Genotype) -> bool {
     if gt[0] == bcf::record::GenotypeAllele::Unphased(0)
         && gt[1] == bcf::record::GenotypeAllele::Unphased(1)
     {
-        println!("0/1");
         return true;
     } else if gt[0] == bcf::record::GenotypeAllele::Unphased(1)
         && gt[1] == bcf::record::GenotypeAllele::Unphased(0)
     {
-        println!("1/0");
         return true;
     } else if gt[0] == bcf::record::GenotypeAllele::Unphased(0)
         && gt[1] == bcf::record::GenotypeAllele::Phased(1)
     {
-        println!("0|1");
         return true;
     } else if gt[0] == bcf::record::GenotypeAllele::Unphased(1)
         && gt[1] == bcf::record::GenotypeAllele::Phased(0)
     {
-        println!("1|0");
         return true;
     }
-    println!("not heterozygous");
     return false;
 }
 
