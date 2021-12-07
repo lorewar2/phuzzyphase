@@ -40,10 +40,10 @@ fn main() {
 fn _main() -> Result<(), Error> {
     println!("Welcome to phasst phase!");
     let params = load_params();
-    if params.long_read_bam == None && params.linked_read_bam == None && params.hic_bam == None {
-        eprintln!("Must supply at least one bam");
-        std::process::exit(1);
-    }
+    //if params.long_read_bam == None && params.linked_read_bam == None && params.hic_bam == None {
+    //    eprintln!("Must supply at least one bam");
+    //    std::process::exit(1);
+    //}
     let fai = params.fasta.to_string() + ".fai";
     let fa_index_iter = fasta::Index::from_file(&fai)
         .expect(&format!("error opening fasta index: {}", fai))
