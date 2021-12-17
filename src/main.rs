@@ -267,7 +267,7 @@ fn get_molecule_allele_assignments(
                     println!("what happened, read start {} read end {}",read_start, read_end);
                     continue;
                 }
-                let seq = rec.seq().encoded[read_start..read_end].to_vec();
+                let seq = rec.seq().as_bytes()[read_start..read_end].to_vec();
                 println!("ref sequence {}", std::str::from_utf8(&ref_sequence).unwrap());
                 println!("alt sequence {}", std::str::from_utf8(&alt_sequence).unwrap());
                 println!("read segment {}\n", std::str::from_utf8(&seq).unwrap());
