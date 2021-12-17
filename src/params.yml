@@ -9,6 +9,16 @@ args:
         takes_value: true
         required: true
         help: output directory
+    - min_mapq:
+        long: min_mapq
+        takes_value: true
+        required: false
+        help: minimum mapq reads to use (default 30)
+    - min_base_qual:
+        long: min_base_qual
+        takes_value: true
+        required: false
+        help: minimum base quality to trust (default: 20)
     - vcf:
         long: vcf
         short: v
@@ -61,4 +71,9 @@ args:
         required: false
         help: ploidy of organism, default 2
         takes_value: true
+    - allele_alignment_window:
+        long: allele_alignment_window
+        required: false
+        takes_value: true
+        help: window on either side of an allele to use for alignment when determinging which allele a read supports
         
