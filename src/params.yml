@@ -18,7 +18,7 @@ args:
         long: min_base_qual
         takes_value: true
         required: false
-        help: minimum base quality to trust (default: 20)
+        help: minimum base quality to trust (default 20)
     - vcf:
         long: vcf
         short: v
