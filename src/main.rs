@@ -234,9 +234,11 @@ fn get_molecule_allele_assignments(
                 let rec = _rec.expect("cannot read bam record");
                 println!("\n{}", std::str::from_utf8(rec.qname()).unwrap());
                 if rec.mapq() < min_mapq {
+                    println!("low mapq {}", rec.mapq());
                     continue
                 }
                 if rec.is_secondary() || rec.is_supplementary() {
+                    println!("not primary alignment");
                     continue;
                 }
                 let mut read_start: usize = 10000000000; // I am lazy and for some reason dont know how to do things, so this is my bad solution
@@ -255,22 +257,23 @@ fn get_molecule_allele_assignments(
                     } 
                 }
                 if min_bq < min_base_qual {
+                    println!("low base quality {}",min_bq);
                     continue;
                 }
                 if read_start >= read_end {
-                    eprintln!("what happened, read start {} read end {}",read_start, read_end);
+                    println!("what happened, read start {} read end {}",read_start, read_end);
                     continue;
                 }
                 let seq = rec.seq().encoded[read_start..read_end].to_vec();
-                eprintln!("ref sequence {}", std::str::from_utf8(&ref_sequence).unwrap());
-                eprintln!("alt sequence {}", std::str::from_utf8(&alt_sequence).unwrap());
-                eprintln!("read segment {}\n", std::str::from_utf8(&seq).unwrap());
+                println!("ref sequence {}", std::str::from_utf8(&ref_sequence).unwrap());
+                println!("alt sequence {}", std::str::from_utf8(&alt_sequence).unwrap());
+                println!("read segment {}\n", std::str::from_utf8(&seq).unwrap());
                 let score = |a: u8, b: u8| if a == b { MATCH } else { MISMATCH };
                 let mut aligner = banded::Aligner::new(GAP_OPEN, GAP_EXTEND, score, K, W);
                 let ref_alignment = aligner.local(&seq, &ref_sequence);
                 let alt_alignment = aligner.local(&seq, &alt_sequence);
                 if ref_alignment.score > alt_alignment.score {
-                    eprintln!("read supports ref allele");
+                    println!("read supports ref allele");
                     match &mut molecule_alleles.long_read_assignments {
                         Some(long_read_assignment) => {
                             let readdata = long_read_assignment.entry(std::str::from_utf8(rec.qname()).expect("readname fail").to_string()).or_insert(Vec::new());
@@ -282,7 +285,7 @@ fn get_molecule_allele_assignments(
                         None => (),
                     }
                 } else if alt_alignment.score > ref_alignment.score {
-                    eprintln!("read supports alt allele");
+                    println!("read supports alt allele");
                     match &mut molecule_alleles.long_read_assignments {
                         Some(long_read_assignment) => {
                             let readdata = long_read_assignment.entry(std::str::from_utf8(rec.qname()).expect("readname fail").to_string()).or_insert(Vec::new());
@@ -294,7 +297,7 @@ fn get_molecule_allele_assignments(
                         None => (),
                     }
                 } else {
-                    eprintln!("\nread had equal alignment scores ref {} alt {}", ref_allele, alt_allele);
+                    println!("\nread had equal alignment scores ref {} alt {}", ref_allele, alt_allele);
                     
                 }
                 
