@@ -16,6 +16,7 @@ use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bcf::{self, Read as BcfRead};
 use rust_htslib::bcf::{Format};
 use std::path::Path;
+use std::fs;
 
 use hashbrown::{HashMap, HashSet};
 
@@ -53,6 +54,7 @@ fn _main() -> Result<(), Error> {
     //    eprintln!("Must supply at least one bam");
     //    std::process::exit(1);
     //}
+    fs::create_dir(params.output.to_string())?;
     let fai = params.fasta.to_string() + ".fai";
     let fa_index_iter = fasta::Index::from_file(&fai)
         .expect(&format!("error opening fasta index: {}", fai))
