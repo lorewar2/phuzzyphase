@@ -190,6 +190,11 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
                 &mut rec
             );
         }
+        if i > 10{ return Ok(MoleculeAllelesWrapper { // TODO change to moleculeallelewrapper
+            hic_alleles: None,
+            long_read_alleles: None,
+            linked_read_alleles: None,
+        }); }
     }
     println!("done, saw {} records of which {} were hets in chrom {}", total, hets, data.chrom);
     Ok(MoleculeAllelesWrapper { // TODO change to moleculeallelewrapper
@@ -247,13 +252,13 @@ fn get_variant_assignments (
             let mut read_names_alt: Vec<String> = Vec::new();
             for _rec in bam.records() {
                 let rec = _rec.expect("cannot read bam record");
-                println!("\n{}", std::str::from_utf8(rec.qname()).unwrap());
+                //println!("\n{}", std::str::from_utf8(rec.qname()).unwrap());
                 if rec.mapq() < min_mapq {
-                    println!("low mapq {}", rec.mapq());
+                    //println!("low mapq {}", rec.mapq());
                     continue
                 }
                 if rec.is_secondary() || rec.is_supplementary() {
-                    println!("not primary alignment");
+                    //println!("not primary alignment");
                     continue;
                 }
                 let mut read_start: Option<usize> = None; // I am lazy and for some reason dont know how to do things, so this is my bad solution
@@ -273,7 +278,7 @@ fn get_variant_assignments (
                     } 
                 }
                 if min_bq < min_base_qual {
-                    println!("low base quality {}",min_bq);
+                    //println!("low base quality {}",min_bq);
                     continue;
                 }
                 if read_start == None {
@@ -311,7 +316,7 @@ fn get_variant_assignments (
                         None => (),
                     }
                 } else {
-                    println!("\nread had equal alignment scores ref {} alt {}", ref_allele, alt_allele);
+                    //println!("\nread had equal alignment scores ref {} alt {}", ref_allele, alt_allele);
                 }
             }
             //let mut wrap_ref: Vec<Vec<Vec<u8>>> = Vec::new();
