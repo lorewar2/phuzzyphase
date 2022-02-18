@@ -14,6 +14,7 @@ use rayon::prelude::*;
 use rust_htslib::bam::{self, Read, Record};
 use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bcf::{self, Read as BcfRead};
+use rust_htslib::bcf::{Format};
 use std::path::Path;
 
 use hashbrown::{HashMap, HashSet};
@@ -28,8 +29,8 @@ const GAP_OPEN: i32 = -5; // Gap open score
 const GAP_EXTEND: i32 = -1; // Gap extend score
 
 fn main() {
-    let res = _main();
-    if let Err(v) = res {
+    let result = _main();
+    if let Err(v) = result {
         let fail = v.as_fail();
         println!("Phasstphase error. v{}.", env!("CARGO_PKG_VERSION"));
         println!("Error: {}", fail);
@@ -65,9 +66,10 @@ fn _main() -> Result<(), Error> {
         chrom_lengths.push(chrom.len);
     }
     */
-
+    let mut vcf_reader = bcf::IndexedReader::from_path(params.vcf.to_string())?;
     let mut chunks: Vec<ThreadData> = Vec::new();
     for (i, chrom) in chroms.iter().enumerate() {
+
         let data = ThreadData {
             index: i,
             long_read_bam: match &params.long_read_bam {
@@ -89,6 +91,7 @@ fn _main() -> Result<(), Error> {
             min_base_qual: params.min_base_qual,
             chrom_length: chrom_lengths[i],
             window: params.window,
+            output: params.output.to_string(),
         };
         chunks.push(data);
     }
@@ -107,11 +110,11 @@ fn _main() -> Result<(), Error> {
 
 fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     println!("thread {} chrom {}", data.index, data.chrom);
-    let molecule_alleles = get_molecule_alleles_assignments(data);
+    let molecule_alleles = get_all_variant_assignments(data);
     Ok(())
 }
 
-fn get_molecule_alleles_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapper, Error> {
+fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapper, Error> {
     let mut long_read_bam_reader = match &data.long_read_bam {
         Some(x) => Some(bam::IndexedReader::from_path(x)?),
         None => None,
@@ -141,16 +144,16 @@ fn get_molecule_alleles_assignments(data: &ThreadData) -> Result<MoleculeAlleles
             None => None,
         },
     };
-   
-
     let mut vcf_reader = bcf::IndexedReader::from_path(data.vcf.to_string())?;
-    let rid = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
-    vcf_reader.fetch(rid, 0, None)?; 
+    let mut vcf_writer = bcf::Writer::from_path(format!("{}/chrom_{}.vcf", data.output, data.chrom), 
+        &bcf::header::Header::from_template(vcf_reader.header()), true, Format::Vcf)?;
+    let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
+    vcf_reader.fetch(chrom, 0, None)?;  // skip to chromosome for this thread
     let mut total = 0;
     let mut hets = 0;
     for (i, _rec) in vcf_reader.records().enumerate() {
         total += 1;
-        let rec = _rec?;
+        let mut rec = _rec?;
         let pos = rec.pos();
         let alleles = rec.alleles();
         if alleles.len() > 2 {
@@ -158,13 +161,13 @@ fn get_molecule_alleles_assignments(data: &ThreadData) -> Result<MoleculeAlleles
         }
         let reference = std::str::from_utf8(alleles[0])?;
         let alternative = std::str::from_utf8(alleles[1])?;
-        let rec_rid = rec.rid().expect("could not unwrap vcf record id");
+        let rec_chrom = rec.rid().expect("could not unwrap vcf record id");
 
         let genotypes = rec.genotypes()?;
         let genotype = genotypes.get(0); // assume only 1 and get the first one
         if is_heterozygous(genotype) {
             hets += 1;
-            get_molecule_allele_assignments(
+            get_variant_assignments(
                 &data.chrom,
                 pos as usize,
                 reference.to_string(),
@@ -178,11 +181,13 @@ fn get_molecule_alleles_assignments(data: &ThreadData) -> Result<MoleculeAlleles
                 data.window,
                 data.chrom_length,
                 &mut molecule_alleles,
+                &mut vcf_writer,
+                &mut rec
             );
         }
     }
     println!("done, saw {} records of which {} were hets in chrom {}", total, hets, data.chrom);
-    Ok(MoleculeAllelesWrapper {
+    Ok(MoleculeAllelesWrapper { // TODO change to moleculeallelewrapper
         hic_alleles: None,
         long_read_alleles: None,
         linked_read_alleles: None,
@@ -190,7 +195,7 @@ fn get_molecule_alleles_assignments(data: &ThreadData) -> Result<MoleculeAlleles
 }
 
 
-fn get_molecule_allele_assignments(
+fn get_variant_assignments (
     chrom: &String,
     pos: usize,
     ref_allele: String,
@@ -204,6 +209,9 @@ fn get_molecule_allele_assignments(
     window: usize,
     chrom_length: u64,
     molecule_alleles: &mut MoleculeAlleleWrapper,
+    vcf_writer: &mut bcf::Writer,
+    vcf_record: &mut bcf::record::Record,
+
 ) {
     if (pos + window) as u64 > chrom_length {
         return;
@@ -211,7 +219,7 @@ fn get_molecule_allele_assignments(
     match long_reads {
         Some(bam) => {
             let tid = bam.header().tid(chrom.as_bytes()).expect("cannot find chrom tid");
-            bam.fetch((tid, pos as u32, (pos + 1) as u32)).expect("blah");
+            bam.fetch((tid, pos as u32, (pos + 1) as u32)).expect("blah"); // skip to region of bam of this variant position
             let ref_start = (pos - window) as u64;
             let ref_end = (pos + window + ref_allele.len()) as u64;
             fasta.fetch(chrom, ref_start, ref_end);
@@ -233,6 +241,8 @@ fn get_molecule_allele_assignments(
             println!("ref_sequence {}", std::str::from_utf8(&ref_sequence).unwrap());
             println!("alt_sequence {}", std::str::from_utf8(&alt_sequence).unwrap());
             println!("");
+            let mut read_names_ref: Vec<String> = Vec::new();
+            let mut read_names_alt: Vec<String> = Vec::new();
             for _rec in bam.records() {
                 let rec = _rec.expect("cannot read bam record");
                 println!("\n{}", std::str::from_utf8(rec.qname()).unwrap());
@@ -244,7 +254,7 @@ fn get_molecule_allele_assignments(
                     println!("not primary alignment");
                     continue;
                 }
-                let mut read_start: usize = 10000000000; // I am lazy and for some reason dont know how to do things, so this is my bad solution
+                let mut read_start: Option<usize> = None; // I am lazy and for some reason dont know how to do things, so this is my bad solution
                 let mut read_end: usize = rec.seq_len();
                 let mut min_bq = 93;
                 let qual = rec.qual();
@@ -254,8 +264,9 @@ fn get_molecule_allele_assignments(
                             min_bq = min_bq.min(qual[pos_pair[0] as usize]);
                         }
                         read_end = pos_pair[0] as usize;
-                        if read_start == 10000000000 {
-                            read_start = pos_pair[0] as usize;
+                        if read_start == None {
+                            read_start = Some(pos_pair[0] as usize); // assign this value only the first time in this loop that outter if statement is true
+                            // getting the position in the read that corresponds to the reference region of pos-window
                         }
                     } 
                 }
@@ -263,10 +274,11 @@ fn get_molecule_allele_assignments(
                     println!("low base quality {}",min_bq);
                     continue;
                 }
-                if read_start >= read_end {
-                    println!("what happened, read start {} read end {}",read_start, read_end);
+                if read_start == None {
+                    println!("what happened, read start {:?} read end {}", read_start, read_end);
                     continue;
                 }
+                let read_start = read_start.expect("why read start is none");
                 let seq = rec.seq().as_bytes()[read_start..read_end].to_vec();
                 println!("ref sequence {}", std::str::from_utf8(&ref_sequence).unwrap());
                 println!("alt sequence {}", std::str::from_utf8(&alt_sequence).unwrap());
@@ -277,6 +289,7 @@ fn get_molecule_allele_assignments(
                 let alt_alignment = aligner.local(&seq, &alt_sequence);
                 if ref_alignment.score > alt_alignment.score {
                     println!("read supports ref allele");
+                    read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
                     match &mut molecule_alleles.long_read_assignments {
                         Some(long_read_assignment) => {
                             let readdata = long_read_assignment.entry(std::str::from_utf8(rec.qname()).expect("readname fail").to_string()).or_insert(Vec::new());
@@ -289,6 +302,7 @@ fn get_molecule_allele_assignments(
                     }
                 } else if alt_alignment.score > ref_alignment.score {
                     println!("read supports alt allele");
+                    read_names_alt.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
                     match &mut molecule_alleles.long_read_assignments {
                         Some(long_read_assignment) => {
                             let readdata = long_read_assignment.entry(std::str::from_utf8(rec.qname()).expect("readname fail").to_string()).or_insert(Vec::new());
@@ -301,10 +315,16 @@ fn get_molecule_allele_assignments(
                     }
                 } else {
                     println!("\nread had equal alignment scores ref {} alt {}", ref_allele, alt_allele);
-                    
                 }
-                
             }
+            //let mut wrap_ref: Vec<Vec<Vec<u8>>> = Vec::new();
+            //wrap_ref.push(read_names_ref);
+            //let mut wrap_alt: Vec<Vec<Vec<u8>>> = Vec::new();
+            //wrap_alt.push(read_names_alt);
+            let concat_ref = read_names_ref.join(";");
+            let concat_alt = read_names_alt.join(";");
+            vcf_record.push_format_char(b"RM", &concat_ref.as_bytes()).expect("failed to add ref format string to vcf");
+            vcf_record.push_format_char(b"AM", &concat_alt.as_bytes()).expect("failed to add alt format string to vcf");
         }
         None => (),
     }
@@ -366,6 +386,7 @@ struct ThreadData {
     min_mapq: u8,
     min_base_qual: u8,
     window: usize,
+    output: String,
 }
 
 #[derive(Clone)]
