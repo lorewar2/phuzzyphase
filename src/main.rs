@@ -148,8 +148,8 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
     };
     let mut vcf_reader = bcf::IndexedReader::from_path(data.vcf.to_string())?;
     let mut header = bcf::header::Header::from_template(vcf_reader.header());
-    header.push_record(b"##FORMAT=<ID=AM,Number=.,Type=String,Description=\"alt molecules\">");
-    header.push_record(b"##FORMAT=<ID=RM,Number=.,Type=String,Description=\"ref molecules\">");
+    header.push_record(br#"##FORMAT=<ID=AM,Number=.,Type=String,Description=\"alt molecules\">"#);
+    header.push_record(br#"##FORMAT=<ID=RM,Number=.,Type=String,Description=\"ref molecules\">"#);
     let mut vcf_writer = bcf::Writer::from_path(format!("{}/chrom_{}.vcf", data.output, data.chrom), 
         &header, true, Format::Vcf)?;
     let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
