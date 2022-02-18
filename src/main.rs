@@ -147,8 +147,11 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
         },
     };
     let mut vcf_reader = bcf::IndexedReader::from_path(data.vcf.to_string())?;
+    let mut header = bcf::header::Header::from_template(vcf_reader.header());
+    header.push_record(b"##FORMAT=<ID=AM,Number=R,Type=Integer,Description=\"alt molecules\">");
+    header.push_record(b"##FORMAT=<ID=RM,Number=R,Type=Integer,Description=\"ref molecules\">");
     let mut vcf_writer = bcf::Writer::from_path(format!("{}/chrom_{}.vcf", data.output, data.chrom), 
-        &bcf::header::Header::from_template(vcf_reader.header()), true, Format::Vcf)?;
+        &header, true, Format::Vcf)?;
     let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
     vcf_reader.fetch(chrom, 0, None)?;  // skip to chromosome for this thread
     let mut total = 0;
@@ -239,10 +242,7 @@ fn get_variant_assignments (
                 alt_sequence.push(ref_sequence[i]);
             }
             
-            println!("double checking. ref allele {} alt {} chrom {} pos {}", ref_allele, alt_allele, chrom, pos);
-            println!("ref_sequence {}", std::str::from_utf8(&ref_sequence).unwrap());
-            println!("alt_sequence {}", std::str::from_utf8(&alt_sequence).unwrap());
-            println!("");
+            
             let mut read_names_ref: Vec<String> = Vec::new();
             let mut read_names_alt: Vec<String> = Vec::new();
             for _rec in bam.records() {
@@ -282,15 +282,11 @@ fn get_variant_assignments (
                 }
                 let read_start = read_start.expect("why read start is none");
                 let seq = rec.seq().as_bytes()[read_start..read_end].to_vec();
-                println!("ref sequence {}", std::str::from_utf8(&ref_sequence).unwrap());
-                println!("alt sequence {}", std::str::from_utf8(&alt_sequence).unwrap());
-                println!("read segment {}\n", std::str::from_utf8(&seq).unwrap());
                 let score = |a: u8, b: u8| if a == b { MATCH } else { MISMATCH };
                 let mut aligner = banded::Aligner::new(GAP_OPEN, GAP_EXTEND, score, K, W);
                 let ref_alignment = aligner.local(&seq, &ref_sequence);
                 let alt_alignment = aligner.local(&seq, &alt_sequence);
                 if ref_alignment.score > alt_alignment.score {
-                    println!("read supports ref allele");
                     read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
                     match &mut molecule_alleles.long_read_assignments {
                         Some(long_read_assignment) => {
@@ -303,7 +299,6 @@ fn get_variant_assignments (
                         None => (),
                     }
                 } else if alt_alignment.score > ref_alignment.score {
-                    println!("read supports alt allele");
                     read_names_alt.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
                     match &mut molecule_alleles.long_read_assignments {
                         Some(long_read_assignment) => {
