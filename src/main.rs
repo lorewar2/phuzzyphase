@@ -150,43 +150,54 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
     let mut vcf_reader = bcf::IndexedReader::from_path(data.vcf.to_string())?;
     let header_view =  vcf_reader.header();
     let mut new_header = bcf::header::Header::new();
+    new_header.push_record(br#"##fileformat=VCFv4.2"#);
     new_header.push_record(br#"##FORMAT=<ID=AM,Number=1,Type=String,Description="alt molecules">"#);
     new_header.push_record(br#"##FORMAT=<ID=RMM,Number=1,Type=String,Description="ref molecules">"#);
     new_header.push_record(br#"##FORMAT=<ID=KAF,Number=1,Type=Float,Description="alt molecules">"#);
     for header_record in header_view.header_records() {
         match header_record {
             bcf::header::HeaderRecord::Filter{key, values} => {
-                println!("filter {}",key);
+                let mut items: Vec<String> = Vec::new();
                 for (x,y) in &values {
-                    println!("{},{}",x,y);
+                    items.push(format!("{}={}",x,y));
                 }
+                let content = items.join(",");
+                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
             },
             bcf::header::HeaderRecord::Info{key, values} => {
-                println!("info {}",key);
+                let mut items: Vec<String> = Vec::new();
                 for (x,y) in &values {
-                    println!("{},{}",x,y);
+                    items.push(format!("{}={}",x,y));
                 }
+                let content = items.join(",");
+                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
             },
             bcf::header::HeaderRecord::Format{key, values} => {
-                println!("format {}",key);
+                let mut items: Vec<String> = Vec::new();
                 for (x,y) in &values {
-                    println!("{},{}",x,y);
+                    items.push(format!("{}={}",x,y));
                 }
+                let content = items.join(",");
+                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
             },
             bcf::header::HeaderRecord::Contig{key, values} => {
-                println!("contig {}",key);
+                let mut items: Vec<String> = Vec::new();
                 for (x,y) in &values {
-                    println!("{},{}",x,y);
+                    items.push(format!("{}={}",x,y));
                 }
+                let content = items.join(",");
+                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
             },
             bcf::header::HeaderRecord::Structured{key, values} => {
-                println!("structured {}",key);
+                let mut items: Vec<String> = Vec::new();
                 for (x,y) in &values {
-                    println!("{},{}",x,y);
+                    items.push(format!("{}={}",x,y));
                 }
+                let content = items.join(",");
+                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
             },
             bcf::header::HeaderRecord::Generic{key, value} => {
-                println!("generic {} {}",key, value);
+                new_header.push_record(&format!("##{}={}",key,value).as_bytes());
             },
         }
     }
