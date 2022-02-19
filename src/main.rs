@@ -149,12 +149,12 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
     };
     let mut vcf_reader = bcf::IndexedReader::from_path(data.vcf.to_string())?;
     let header_view =  vcf_reader.header();
-    let mut new_header = bcf::header::Header::new();
+    let mut new_header = bcf::header::Header::from_template(header_view);
     new_header.push_record(br#"##fileformat=VCFv4.2"#);
     new_header.push_record(br#"##FORMAT=<ID=AM,Number=1,Type=String,Description="alt molecules">"#);
     new_header.push_record(br#"##FORMAT=<ID=RM,Number=1,Type=String,Description="ref molecules">"#);
     new_header.push_record(br#"##FORMAT=<ID=KAF,Number=A,Type=Float,Description="alt molecules">"#);
-    for header_record in header_view.header_records() {
+    /*for header_record in header_view.header_records() {
         match header_record {
             bcf::header::HeaderRecord::Filter{key, values} => {
                 let mut items: Vec<String> = Vec::new();
@@ -200,7 +200,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
                 new_header.push_record(&format!("##{}={}",key,value).as_bytes());
             },
         }
-    }
+    }*/
     let mut vcf_writer = bcf::Writer::from_path(format!("{}/chrom_{}.vcf", data.output, data.chrom), 
         &new_header, true, Format::Vcf)?;
     let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
