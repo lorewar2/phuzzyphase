@@ -148,8 +148,8 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
     };
     let mut vcf_reader = bcf::IndexedReader::from_path(data.vcf.to_string())?;
     let mut header = bcf::header::Header::from_template(vcf_reader.header());
-    header.push_record(br#"##FORMAT=<ID=AM,Number=.,Type=String,Description="alt molecules">"#);
-    header.push_record(br#"##FORMAT=<ID=RM,Number=.,Type=String,Description="ref molecules">"#);
+    header.push_record(br#"##INFO=<ID=AM,Number=.,Type=String,Description="alt molecules">"#);
+    header.push_record(br#"##INFO=<ID=RM,Number=.,Type=String,Description="ref molecules">"#);
     let mut vcf_writer = bcf::Writer::from_path(format!("{}/chrom_{}.vcf", data.output, data.chrom), 
         &header, true, Format::Vcf)?;
     let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
@@ -325,9 +325,9 @@ fn get_variant_assignments (
             //wrap_alt.push(read_names_alt);
             let concat_ref = read_names_ref.join(";");
             let concat_alt = read_names_alt.join(";");
-            vcf_record.push_format_string(b"RM", &[concat_ref.as_bytes()]);
-            vcf_record.push_format_string(b"AM", &[concat_alt.as_bytes()]);
-            vcf_writer.write(vcf_record);
+            vcf_record.push_info_string(b"RM", &[concat_ref.as_bytes()]).expect("blerg");
+            vcf_record.push_info_string(b"AM", &[concat_alt.as_bytes()]).expect("blarg");
+            vcf_writer.write(vcf_record).expect("nope");
         }
         None => (),
     }
