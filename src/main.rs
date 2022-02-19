@@ -381,7 +381,7 @@ fn get_variant_assignments<'a> (
             //vcf_record.push_format_string(b"RM", &[concat_ref.as_bytes()]).expect("blerg");
             //vcf_record.push_info_string(b"AM", &[concat_ref.as_bytes()]).expect("blarg");
             vcf_record.push_format_float(b"VAF",&[0.66]).expect("gggg");
-            vcf_record.push_format_float(b"KAF",&[0.55]).expect("ffff");
+            //vcf_record.push_format_float(b"KAF",&[0.55]).expect("ffff");
             vcf_writer.write(vcf_record).expect("nope");
         }
         None => (),
