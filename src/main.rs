@@ -152,8 +152,8 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
     let mut new_header = bcf::header::Header::new();
     new_header.push_record(br#"##fileformat=VCFv4.2"#);
     new_header.push_record(br#"##FORMAT=<ID=AM,Number=1,Type=String,Description="alt molecules">"#);
-    new_header.push_record(br#"##FORMAT=<ID=RMM,Number=1,Type=String,Description="ref molecules">"#);
-    new_header.push_record(br#"##FORMAT=<ID=KAF,Number=1,Type=Float,Description="alt molecules">"#);
+    new_header.push_record(br#"##FORMAT=<ID=RM,Number=1,Type=String,Description="ref molecules">"#);
+    new_header.push_record(br#"##FORMAT=<ID=KAF,Number=A,Type=Float,Description="alt molecules">"#);
     for header_record in header_view.header_records() {
         match header_record {
             bcf::header::HeaderRecord::Filter{key, values} => {
@@ -378,8 +378,9 @@ fn get_variant_assignments<'a> (
             //let concat_alt = read_names_alt.join(";");
             //let tmp: Vec<&[u8]> = Vec::new();
             
-            //vcf_record.push_format_string(b"RMM", &[concat_ref.as_bytes()]).expect("blerg");
+            //vcf_record.push_format_string(b"RM", &[concat_ref.as_bytes()]).expect("blerg");
             //vcf_record.push_info_string(b"AM", &[concat_ref.as_bytes()]).expect("blarg");
+            vcf_record.push_format_float(b"VAF",&[0.66]).expect("gggg");
             vcf_record.push_format_float(b"KAF",&[0.55]).expect("ffff");
             vcf_writer.write(vcf_record).expect("nope");
         }
