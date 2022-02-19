@@ -17,6 +17,7 @@ use rust_htslib::bcf::{self, Read as BcfRead};
 use rust_htslib::bcf::{Format};
 use std::path::Path;
 use std::fs;
+use std::convert::TryInto;
 
 use hashbrown::{HashMap, HashSet};
 
@@ -205,7 +206,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
 }
 
 
-fn get_variant_assignments (
+fn get_variant_assignments<'a> (
     chrom: &String,
     pos: usize,
     ref_allele: String,
@@ -232,7 +233,7 @@ fn get_variant_assignments (
             bam.fetch((tid, pos as u32, (pos + 1) as u32)).expect("blah"); // skip to region of bam of this variant position
             let ref_start = (pos - window) as u64;
             let ref_end = (pos + window + ref_allele.len()) as u64;
-            fasta.fetch(chrom, ref_start, ref_end);
+            fasta.fetch(chrom, ref_start, ref_end).expect("fasta fetch failed");
             let mut ref_sequence: Vec<u8> = Vec::new();
             fasta.read(&mut ref_sequence).expect("failed to read fasta sequence");
 
@@ -292,7 +293,7 @@ fn get_variant_assignments (
                 let ref_alignment = aligner.local(&seq, &ref_sequence);
                 let alt_alignment = aligner.local(&seq, &alt_sequence);
                 if ref_alignment.score > alt_alignment.score {
-                    read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
+                    read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtff").to_string());
                     match &mut molecule_alleles.long_read_assignments {
                         Some(long_read_assignment) => {
                             let readdata = long_read_assignment.entry(std::str::from_utf8(rec.qname()).expect("readname fail").to_string()).or_insert(Vec::new());
@@ -323,10 +324,12 @@ fn get_variant_assignments (
             //wrap_ref.push(read_names_ref);
             //let mut wrap_alt: Vec<Vec<Vec<u8>>> = Vec::new();
             //wrap_alt.push(read_names_alt);
-            let concat_ref = read_names_ref.join(";");
-            let concat_alt = read_names_alt.join(";");
+            let concat_ref = read_names_ref.join(",");
+            //let concat_alt = read_names_alt.join(";");
+            //let tmp: Vec<&[u8]> = Vec::new();
+            
             vcf_record.push_info_string(b"RM", &[concat_ref.as_bytes()]).expect("blerg");
-            vcf_record.push_info_string(b"AM", &[concat_alt.as_bytes()]).expect("blarg");
+            vcf_record.push_info_string(b"AM", &[concat_ref.as_bytes()]).expect("blarg");
             vcf_writer.write(vcf_record).expect("nope");
         }
         None => (),
