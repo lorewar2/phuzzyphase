@@ -327,6 +327,7 @@ fn get_variant_assignments (
             let concat_alt = read_names_alt.join(";");
             vcf_record.push_format_string(b"RM", &[concat_ref.as_bytes()]);
             vcf_record.push_format_string(b"AM", &[concat_alt.as_bytes()]);
+            vcf_writer.write(vcf_record);
         }
         None => (),
     }
