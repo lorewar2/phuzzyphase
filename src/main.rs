@@ -153,54 +153,8 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
     new_header.push_record(br#"##fileformat=VCFv4.2"#);
     new_header.push_record(br#"##FORMAT=<ID=AM,Number=1,Type=String,Description="alt molecules">"#);
     new_header.push_record(br#"##FORMAT=<ID=RM,Number=1,Type=String,Description="ref molecules">"#);
-    new_header.push_record(br#"##FORMAT=<ID=KAF,Number=A,Type=Float,Description="alt molecules">"#);
-    /*for header_record in header_view.header_records() {
-        match header_record {
-            bcf::header::HeaderRecord::Filter{key, values} => {
-                let mut items: Vec<String> = Vec::new();
-                for (x,y) in &values {
-                    items.push(format!("{}={}",x,y));
-                }
-                let content = items.join(",");
-                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
-            },
-            bcf::header::HeaderRecord::Info{key, values} => {
-                let mut items: Vec<String> = Vec::new();
-                for (x,y) in &values {
-                    items.push(format!("{}={}",x,y));
-                }
-                let content = items.join(",");
-                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
-            },
-            bcf::header::HeaderRecord::Format{key, values} => {
-                let mut items: Vec<String> = Vec::new();
-                for (x,y) in &values {
-                    items.push(format!("{}={}",x,y));
-                }
-                let content = items.join(",");
-                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
-            },
-            bcf::header::HeaderRecord::Contig{key, values} => {
-                let mut items: Vec<String> = Vec::new();
-                for (x,y) in &values {
-                    items.push(format!("{}={}",x,y));
-                }
-                let content = items.join(",");
-                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
-            },
-            bcf::header::HeaderRecord::Structured{key, values} => {
-                let mut items: Vec<String> = Vec::new();
-                for (x,y) in &values {
-                    items.push(format!("{}={}",x,y));
-                }
-                let content = items.join(",");
-                new_header.push_record(&format!("##{}=<{}>",key,content).as_bytes());
-            },
-            bcf::header::HeaderRecord::Generic{key, value} => {
-                new_header.push_record(&format!("##{}={}",key,value).as_bytes());
-            },
-        }
-    }*/
+
+ 
     let mut vcf_writer = bcf::Writer::from_path(format!("{}/chrom_{}.vcf", data.output, data.chrom), 
         &new_header, true, Format::Vcf)?;
     let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
@@ -209,9 +163,11 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
     let mut hets = 0;
     for (i, _rec) in vcf_reader.records().enumerate() {
         total += 1;
-        let mut rec = _rec?;
+        let rec = _rec?;
         let pos = rec.pos();
         let alleles = rec.alleles();
+        let mut new_rec = vcf_writer.empty_record();
+        copy_vcf_record(&mut new_rec, &rec);
         if alleles.len() > 2 {
             continue; // ignore multi allelic sites
         }
@@ -238,7 +194,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
                 data.chrom_length,
                 &mut molecule_alleles,
                 &mut vcf_writer,
-                &mut rec
+                &mut new_rec
             );
         }
         if i > 10{ return Ok(MoleculeAllelesWrapper { // TODO change to moleculeallelewrapper
@@ -253,6 +209,38 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
         long_read_alleles: None,
         linked_read_alleles: None,
     })
+}
+
+fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record) {
+    new_rec.set_rid(rec.rid());
+    new_rec.set_pos(rec.pos());
+    new_rec.set_id(&rec.id());
+    for filter in rec.filters() {
+        new_rec.push_filter(&filter);
+    }
+    new_rec.set_alleles(&rec.alleles()).expect("could not write alleles to new record???");
+    new_rec.set_qual(rec.qual());
+    let header = rec.header();
+    for header_record in header.header_records() {
+        match header_record {
+            bcf::header::HeaderRecord::Filter{key, values} => {},
+            bcf::header::HeaderRecord::Info{key, values} => {
+                println!("INFO {}", key);
+                for (x,y) in &values {
+                    println!("\t{}, {}",x,y);
+                }
+            },
+            bcf::header::HeaderRecord::Format{key, values} => {
+                println!("FORMAT {}", key);
+                for (x,y) in &values {
+                    println!("\t{}, {}",x,y);
+                }
+            },
+            bcf::header::HeaderRecord::Contig{key, values} => {},
+            bcf::header::HeaderRecord::Structured{key, values} => {},
+            bcf::header::HeaderRecord::Generic{key, value} => {},
+        }
+    }
 }
 
 
@@ -380,7 +368,7 @@ fn get_variant_assignments<'a> (
             
             //vcf_record.push_format_string(b"RM", &[concat_ref.as_bytes()]).expect("blerg");
             //vcf_record.push_info_string(b"AM", &[concat_ref.as_bytes()]).expect("blarg");
-            vcf_record.push_format_string(b"VAF",&[concat_ref.as_bytes()]).expect("gggg");
+            vcf_record.push_format_string(b"RM",&[concat_ref.as_bytes()]).expect("gggg");
             //vcf_record.push_format_float(b"KAF",&[0.55]).expect("ffff");
             vcf_writer.write(vcf_record).expect("nope");
         }
