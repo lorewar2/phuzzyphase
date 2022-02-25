@@ -55,7 +55,12 @@ fn _main() -> Result<(), Error> {
     //    eprintln!("Must supply at least one bam");
     //    std::process::exit(1);
     //}
-    fs::create_dir(params.output.to_string())?;
+    if Path::new(&params.output).is_dir() {
+        eprintln!("restarting from partial output in {}", params.output);
+    } else {
+        fs::create_dir(params.output.to_string())?;
+    }
+    
     let fai = params.fasta.to_string() + ".fai";
     let fa_index_iter = fasta::Index::from_file(&fai)
         .expect(&format!("error opening fasta index: {}", fai))
@@ -233,6 +238,7 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
             bcf::header::HeaderRecord::Info{key, values} => {
                 let mut format = FORMAT{Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
                 for (x,y) in values {
+                    println!("\t{} {}",x,y);
                     match x {
                         id => format.Id = y,
                         type_string => match y {
@@ -243,33 +249,35 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                         }
                     }
                 }
+                println!("FORMAT {}, {:?}", format.Id, format.Type);
                 match format.Type {
                     FORMAT_TYPE::Integer => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).integer().expect("nope");
+                        let rec_format = rec.format(&format.Id.as_bytes()).integer().expect("nope1");
                         for thingy in rec_format.iter() {
-                            new_rec.push_info_integer(&format.Id.as_bytes(), thingy).expect("fail");
+                            new_rec.push_info_integer(&format.Id.as_bytes(), thingy).expect("fail1");
                         }
                     },
                     FORMAT_TYPE::Float => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).float().expect("nope");
+                        let rec_format = rec.format(&format.Id.as_bytes()).float().expect("nope2");
                         for thingy in rec_format.iter() {
-                            new_rec.push_info_float(&format.Id.as_bytes(), thingy).expect("fail");
+                            new_rec.push_info_float(&format.Id.as_bytes(), thingy).expect("fail2");
                         }
                     },
                     FORMAT_TYPE::String => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope");
-                        new_rec.push_info_string(&format.Id.as_bytes(), &rec_format).expect("fail");
+                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope3");
+                        new_rec.push_info_string(&format.Id.as_bytes(), &rec_format).expect("fail3");
 
                     },
                     FORMAT_TYPE::Char => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope");
-                        new_rec.push_info_string(&format.Id.as_bytes(), &rec_format).expect("fail");
+                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope4");
+                        new_rec.push_info_string(&format.Id.as_bytes(), &rec_format).expect("fail4");
                     },
                 }
             },
             bcf::header::HeaderRecord::Format{key, values} => {
                 let mut format = FORMAT {Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
                 for (x,y) in values {
+                    println!("\t{} {}",x,y);
                     match x {
                         id => format.Id = y,
                         type_string => match y {
@@ -282,26 +290,26 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                 }
                 match format.Type {
                     FORMAT_TYPE::Integer => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).integer().expect("nope");
+                        let rec_format = rec.format(&format.Id.as_bytes()).integer().expect("nope5");
                         for thingy in rec_format.iter() {
-                            new_rec.push_format_integer(&format.Id.as_bytes(), thingy).expect("fail");
+                            new_rec.push_format_integer(&format.Id.as_bytes(), thingy).expect("fail5");
                         }
                     },
                     FORMAT_TYPE::Float => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).float().expect("nope");
+                        let rec_format = rec.format(&format.Id.as_bytes()).float().expect("nope6");
                         for thingy in rec_format.iter() {
-                            new_rec.push_format_float(&format.Id.as_bytes(), thingy).expect("fail");
+                            new_rec.push_format_float(&format.Id.as_bytes(), thingy).expect("fail6");
                         }
                     },
                     FORMAT_TYPE::String => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope");
-                        new_rec.push_format_string(&format.Id.as_bytes(), &rec_format).expect("fail");
+                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope7");
+                        new_rec.push_format_string(&format.Id.as_bytes(), &rec_format).expect("fail7");
                         
                     },
                     FORMAT_TYPE::Char => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope");
+                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope8");
                         for thingy in rec_format.iter() {
-                            new_rec.push_format_char(&format.Id.as_bytes(), thingy).expect("fail");
+                            new_rec.push_format_char(&format.Id.as_bytes(), thingy).expect("fail8");
                         }
                     },
                 }
@@ -318,6 +326,7 @@ struct FORMAT {
     Type: FORMAT_TYPE,
 }
 
+#[derive(Debug)]
 enum FORMAT_TYPE {
     Integer, Float, String, Char
 }
