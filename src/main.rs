@@ -226,12 +226,6 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
     new_rec.set_alleles(&rec.alleles()).expect("could not write alleles to new record???");
     new_rec.set_qual(rec.qual());
     let header = rec.header();
-    let id = "ID".to_string();
-    let type_string = "type".to_string();
-    let int_string = "Integer".to_string();
-    let float_string = "Float".to_string();
-    let string = "String".to_string();
-    let char_string = "Char".to_string();
     for header_record in header.header_records() {
         match header_record {
             bcf::header::HeaderRecord::Filter{key, values} => {},
@@ -239,14 +233,16 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                 let mut format = FORMAT{Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
                 for (x,y) in values {
                     println!("\t{} {}",x,y);
-                    match x {
-                        id => format.Id = y,
-                        type_string => match y {
-                            int_string => format.Type = FORMAT_TYPE::Integer,
-                            float_string => format.Type = FORMAT_TYPE::Float,
-                            string => format.Type = FORMAT_TYPE::String,
-                            char_string => format.Type = FORMAT_TYPE::Char,
-                        }
+                    match x.as_str() {
+                        "ID" => format.Id = y,
+                        "Type" => match y.as_str() {
+                            "Integer" => format.Type = FORMAT_TYPE::Integer,
+                            "Float" => format.Type = FORMAT_TYPE::Float,
+                            "String" => format.Type = FORMAT_TYPE::String,
+                            "Char" => format.Type = FORMAT_TYPE::Char,
+                            &_ => (),
+                        },
+                        &_ => (),
                     }
                 }
                 println!("FORMAT {}, {:?}", format.Id, format.Type);
@@ -278,14 +274,16 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                 let mut format = FORMAT {Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
                 for (x,y) in values {
                     println!("\t{} {}",x,y);
-                    match x {
-                        id => format.Id = y,
-                        type_string => match y {
-                            int_string => format.Type = FORMAT_TYPE::Integer,
-                            float_string => format.Type = FORMAT_TYPE::Float,
-                            string => format.Type = FORMAT_TYPE::String,
-                            char_string => format.Type = FORMAT_TYPE::Char,
-                        }
+                    match x.as_str() {
+                        "ID" => format.Id = y,
+                        "Type" => match y.as_str() {
+                            "Integer" => format.Type = FORMAT_TYPE::Integer,
+                            "Float" => format.Type = FORMAT_TYPE::Float,
+                            "String" => format.Type = FORMAT_TYPE::String,
+                            "Char" => format.Type = FORMAT_TYPE::Char,
+                            &_ => (),
+                        },
+                        &_ => (),
                     }
                 }
                 match format.Type {
