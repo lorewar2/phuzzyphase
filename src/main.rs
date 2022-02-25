@@ -221,19 +221,89 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
     new_rec.set_alleles(&rec.alleles()).expect("could not write alleles to new record???");
     new_rec.set_qual(rec.qual());
     let header = rec.header();
+    let id = "ID".to_string();
+    let type_string = "type".to_string();
+    let int_string = "Integer".to_string();
+    let float_string = "Float".to_string();
+    let string = "String".to_string();
+    let char_string = "Char".to_string();
     for header_record in header.header_records() {
         match header_record {
             bcf::header::HeaderRecord::Filter{key, values} => {},
             bcf::header::HeaderRecord::Info{key, values} => {
-                println!("INFO {}", key);
-                for (x,y) in &values {
-                    println!("\t{}, {}",x,y);
+                let mut format = FORMAT{Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
+                for (x,y) in values {
+                    match x {
+                        id => format.Id = y,
+                        type_string => match y {
+                            int_string => format.Type = FORMAT_TYPE::Integer,
+                            float_string => format.Type = FORMAT_TYPE::Float,
+                            string => format.Type = FORMAT_TYPE::String,
+                            char_string => format.Type = FORMAT_TYPE::Char,
+                        }
+                    }
+                }
+                match format.Type {
+                    FORMAT_TYPE::Integer => {
+                        let rec_format = rec.format(&format.Id.as_bytes()).integer().expect("nope");
+                        for thingy in rec_format.iter() {
+                            new_rec.push_info_integer(&format.Id.as_bytes(), thingy).expect("fail");
+                        }
+                    },
+                    FORMAT_TYPE::Float => {
+                        let rec_format = rec.format(&format.Id.as_bytes()).float().expect("nope");
+                        for thingy in rec_format.iter() {
+                            new_rec.push_info_float(&format.Id.as_bytes(), thingy).expect("fail");
+                        }
+                    },
+                    FORMAT_TYPE::String => {
+                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope");
+                        new_rec.push_info_string(&format.Id.as_bytes(), &rec_format).expect("fail");
+
+                    },
+                    FORMAT_TYPE::Char => {
+                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope");
+                        new_rec.push_info_string(&format.Id.as_bytes(), &rec_format).expect("fail");
+                    },
                 }
             },
             bcf::header::HeaderRecord::Format{key, values} => {
-                println!("FORMAT {}", key);
-                for (x,y) in &values {
-                    println!("\t{}, {}",x,y);
+                let mut format = FORMAT {Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
+                for (x,y) in values {
+                    match x {
+                        id => format.Id = y,
+                        type_string => match y {
+                            int_string => format.Type = FORMAT_TYPE::Integer,
+                            float_string => format.Type = FORMAT_TYPE::Float,
+                            string => format.Type = FORMAT_TYPE::String,
+                            char_string => format.Type = FORMAT_TYPE::Char,
+                        }
+                    }
+                }
+                match format.Type {
+                    FORMAT_TYPE::Integer => {
+                        let rec_format = rec.format(&format.Id.as_bytes()).integer().expect("nope");
+                        for thingy in rec_format.iter() {
+                            new_rec.push_format_integer(&format.Id.as_bytes(), thingy).expect("fail");
+                        }
+                    },
+                    FORMAT_TYPE::Float => {
+                        let rec_format = rec.format(&format.Id.as_bytes()).float().expect("nope");
+                        for thingy in rec_format.iter() {
+                            new_rec.push_format_float(&format.Id.as_bytes(), thingy).expect("fail");
+                        }
+                    },
+                    FORMAT_TYPE::String => {
+                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope");
+                        new_rec.push_format_string(&format.Id.as_bytes(), &rec_format).expect("fail");
+                        
+                    },
+                    FORMAT_TYPE::Char => {
+                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope");
+                        for thingy in rec_format.iter() {
+                            new_rec.push_format_char(&format.Id.as_bytes(), thingy).expect("fail");
+                        }
+                    },
                 }
             },
             bcf::header::HeaderRecord::Contig{key, values} => {},
@@ -242,6 +312,16 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
         }
     }
 }
+
+struct FORMAT {
+    Id: String,
+    Type: FORMAT_TYPE,
+}
+
+enum FORMAT_TYPE {
+    Integer, Float, String, Char
+}
+
 
 
 fn get_variant_assignments<'a> (
@@ -358,18 +438,11 @@ fn get_variant_assignments<'a> (
                     //println!("\nread had equal alignment scores ref {} alt {}", ref_allele, alt_allele);
                 }
             }
-            //let mut wrap_ref: Vec<Vec<Vec<u8>>> = Vec::new();
-            //wrap_ref.push(read_names_ref);
-            //let mut wrap_alt: Vec<Vec<Vec<u8>>> = Vec::new();
-            //wrap_alt.push(read_names_alt);
-            let concat_ref = read_names_ref.join(";");
-            //let concat_alt = read_names_alt.join(";");
-            //let tmp: Vec<&[u8]> = Vec::new();
             
-            //vcf_record.push_format_string(b"RM", &[concat_ref.as_bytes()]).expect("blerg");
-            //vcf_record.push_info_string(b"AM", &[concat_ref.as_bytes()]).expect("blarg");
+            let concat_ref = read_names_ref.join(";");
+            let concat_alt = read_names_alt.join(";");
+            vcf_record.push_info_string(b"AM", &[concat_ref.as_bytes()]).expect("blarg");
             vcf_record.push_format_string(b"RM",&[concat_ref.as_bytes()]).expect("gggg");
-            //vcf_record.push_format_float(b"KAF",&[0.55]).expect("ffff");
             vcf_writer.write(vcf_record).expect("nope");
         }
         None => (),
