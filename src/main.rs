@@ -232,7 +232,6 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
             bcf::header::HeaderRecord::Info{key, values} => {
                 let mut format = FORMAT{Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
                 for (x,y) in values {
-                    println!("\t{} {}",x,y);
                     match x.as_str() {
                         "ID" => format.Id = y,
                         "Type" => match y.as_str() {
@@ -245,35 +244,48 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                         &_ => (),
                     }
                 }
-                println!("FORMAT {}, {:?}", format.Id, format.Type);
                 match format.Type {
                     FORMAT_TYPE::Integer => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).integer().expect("nope1");
-                        for thingy in rec_format.iter() {
-                            new_rec.push_info_integer(&format.Id.as_bytes(), thingy).expect("fail1");
+                        match rec.info(&format.Id.as_bytes()).integer() {
+                            Ok(rec_format) => {
+                                for thingy in rec_format.iter() {
+                                    new_rec.push_info_integer(&format.Id.as_bytes(), thingy).expect("fail1");
+                                }
+                            },
+                            Err(_) => (),
                         }
                     },
                     FORMAT_TYPE::Float => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).float().expect("nope2");
-                        for thingy in rec_format.iter() {
-                            new_rec.push_info_float(&format.Id.as_bytes(), thingy).expect("fail2");
+                        match rec.info(&format.Id.as_bytes()).float() {
+                            Ok(rec_format) => {
+                                for thingy in rec_format.iter() {
+                                    new_rec.push_info_float(&format.Id.as_bytes(), thingy).expect("fail1");
+                                }
+                            },
+                            Err(_) => (),
                         }
                     },
                     FORMAT_TYPE::String => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope3");
-                        new_rec.push_info_string(&format.Id.as_bytes(), &rec_format).expect("fail3");
-
+                        match rec.info(&format.Id.as_bytes()).string() {
+                            Ok(rec_format) => {
+                                new_rec.push_info_string(&format.Id.as_bytes(), &rec_format.expect("blerg")).expect("fail1");
+                            },
+                            Err(_) => (),
+                        }
                     },
                     FORMAT_TYPE::Char => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope4");
-                        new_rec.push_info_string(&format.Id.as_bytes(), &rec_format).expect("fail4");
+                        match rec.info(&format.Id.as_bytes()).string() {
+                            Ok(rec_format) => {
+                                new_rec.push_info_string(&format.Id.as_bytes(), &rec_format.expect("blerg2")).expect("fail1");
+                            },
+                            Err(_) => (),
+                        }
                     },
                 }
             },
             bcf::header::HeaderRecord::Format{key, values} => {
                 let mut format = FORMAT {Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
                 for (x,y) in values {
-                    println!("\t{} {}",x,y);
                     match x.as_str() {
                         "ID" => format.Id = y,
                         "Type" => match y.as_str() {
@@ -288,26 +300,49 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                 }
                 match format.Type {
                     FORMAT_TYPE::Integer => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).integer().expect("nope5");
-                        for thingy in rec_format.iter() {
-                            new_rec.push_format_integer(&format.Id.as_bytes(), thingy).expect("fail5");
+                        match rec.format(&format.Id.as_bytes()).integer() {
+                            Ok(rec_format) => {
+                                for thingy in rec_format.iter() {
+                                    new_rec.push_format_integer(&format.Id.as_bytes(), thingy).expect("noooooooooo");
+                                }
+                            },
+                            Err(_) => (),
                         }
                     },
                     FORMAT_TYPE::Float => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).float().expect("nope6");
-                        for thingy in rec_format.iter() {
-                            new_rec.push_format_float(&format.Id.as_bytes(), thingy).expect("fail6");
+                        match rec.format(&format.Id.as_bytes()).float() {
+                            Ok(rec_format) => {
+                                for thingy in rec_format.iter() {
+                                    new_rec.push_format_float(&format.Id.as_bytes(), thingy).expect("fail1");
+                                }
+                            },
+                            Err(_) => (),
                         }
                     },
                     FORMAT_TYPE::String => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope7");
-                        new_rec.push_format_string(&format.Id.as_bytes(), &rec_format).expect("fail7");
+                        if format.Id == "GT".to_string() {
+                            let sample_count = header.sample_count();
+                            for i in 0..sample_count {
+                                let gt = rec.genotypes().expect("lkjlkj").get(i as usize);
+                                new_rec.push_genotypes(&gt);
+                            }
+                            
+                        } else {
+                            match rec.format(&format.Id.as_bytes()).string() {
+                                Ok(rec_format) => {
+                                    new_rec.push_format_string(&format.Id.as_bytes(), &rec_format).expect("fail1");
+                                },
+                                Err(_) => (),
+                            }
+                        }
                         
                     },
                     FORMAT_TYPE::Char => {
-                        let rec_format = rec.format(&format.Id.as_bytes()).string().expect("nope8");
-                        for thingy in rec_format.iter() {
-                            new_rec.push_format_char(&format.Id.as_bytes(), thingy).expect("fail8");
+                        match rec.format(&format.Id.as_bytes()).string() {
+                            Ok(rec_format) => {
+                                new_rec.push_format_string(&format.Id.as_bytes(), &rec_format).expect("fail1");
+                            },
+                            Err(_) => (),
                         }
                     },
                 }
@@ -448,7 +483,7 @@ fn get_variant_assignments<'a> (
             
             let concat_ref = read_names_ref.join(";");
             let concat_alt = read_names_alt.join(";");
-            vcf_record.push_info_string(b"AM", &[concat_ref.as_bytes()]).expect("blarg");
+            vcf_record.push_format_string(b"AM", &[concat_ref.as_bytes()]).expect("blarg");
             vcf_record.push_format_string(b"RM",&[concat_ref.as_bytes()]).expect("gggg");
             vcf_writer.write(vcf_record).expect("nope");
         }
