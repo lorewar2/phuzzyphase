@@ -5,6 +5,12 @@ extern crate hashbrown;
 extern crate rand;
 extern crate rayon;
 
+use rand::rngs::StdRng;
+use rand::Rng;
+use rand::SeedableRng;
+use std::process::Command;
+
+
 use bio::alignment::pairwise::banded;
 use bio::io::fasta;
 use bio::utils::TextSlice;
@@ -18,6 +24,7 @@ use rust_htslib::bcf::{Format};
 use std::path::Path;
 use std::fs;
 use std::convert::TryInto;
+
 
 use hashbrown::{HashMap, HashSet};
 
@@ -77,7 +84,6 @@ fn _main() -> Result<(), Error> {
     let mut vcf_reader = bcf::IndexedReader::from_path(params.vcf.to_string())?;
     let mut chunks: Vec<ThreadData> = Vec::new();
     for (i, chrom) in chroms.iter().enumerate() {
-
         let data = ThreadData {
             index: i,
             long_read_bam: match &params.long_read_bam {
@@ -100,6 +106,11 @@ fn _main() -> Result<(), Error> {
             chrom_length: chrom_lengths[i],
             window: params.window,
             output: params.output.to_string(),
+            vcf_out: format!("{}/chrom_{}.vcf", params.output, chrom),
+            vcf_out_done: format!("{}/chrom_{}.vcf.done", params.output, chrom),
+            phasing_window: params.phasing_window,
+            seed: params.seed,
+            ploidy: params.ploidy,
         };
         chunks.push(data);
     }
@@ -118,11 +129,67 @@ fn _main() -> Result<(), Error> {
 
 fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     println!("thread {} chrom {}", data.index, data.chrom);
-    let molecule_alleles = get_all_variant_assignments(data);
+    
+    if !Path::new(&data.vcf_out_done).exists() {
+        get_all_variant_assignments(data);
+    }
+    
+    let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}.gz",data.vcf_out.to_string()))
+        .expect("could not open indexed vcf reader on output vcf");
+    let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes()).expect("cant get chrom rid");
+    let cluster_centers = init_cluster_centers(&mut vcf_reader, &data);
+    let mut window_start: usize = 0;
+    let mut window_end: usize = data.phasing_window;
+    
+    while (window_start as u64) < data.chrom_length {
+        
+        vcf_reader.fetch(chrom, window_start as u64, Some(window_end as u64))?;
+        let molecules = get_molecules(&mut vcf_reader);
+        window_start += data.phasing_window/4;
+        window_end += data.phasing_window/4;
+    }
+    
     Ok(())
 }
 
-fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapper, Error> {
+fn get_molecules(vcf: &mut bcf::IndexedReader) -> HashMap<String, Vec<Allele>> {
+    let mut molecules: HashMap<String, Vec<Allele>> = HashMap::new();
+    for rec in vcf.records() {
+        let rec = rec.expect("couldnt unwrap record");
+        let ref_molecules_string = rec.format(b"RM");
+        let alt_molecules_string = rec.format(b"AM");
+    }
+    molecules
+}
+
+struct Allele {
+    index:  usize,
+    allele: bool, // alt is 1, ref is 0
+}
+
+fn init_cluster_centers(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> Vec<Vec<f64>> {
+    let chrom = vcf.header().name2rid(data.chrom.as_bytes()).expect("cant get chrom rid");
+    vcf.fetch(chrom, 0, None).expect("could not fetch in vcf");
+    let mut num = 0;
+    for r in vcf.records() {
+        num += 1;
+    }
+    let seed = [data.seed; 32];
+    let mut rng: StdRng = SeedableRng::from_seed(seed);
+    let mut cluster_centers: Vec<Vec<f64>> = Vec::new();
+    for k in 0..data.ploidy {
+        let mut cluster_center: Vec<f64> = Vec::new();
+        for v in 0..num {
+            cluster_center.push(0.5);
+        }
+        cluster_center[0] = rng.gen::<f64>().min(0.98).max(0.02);
+        cluster_centers.push(cluster_center);
+    }
+    cluster_centers
+}
+
+
+fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
     let mut long_read_bam_reader = match &data.long_read_bam {
         Some(x) => Some(bam::IndexedReader::from_path(x)?),
         None => None,
@@ -160,7 +227,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
     new_header.push_record(br#"##FORMAT=<ID=RM,Number=1,Type=String,Description="ref molecules">"#);
 
  
-    let mut vcf_writer = bcf::Writer::from_path(format!("{}/chrom_{}.vcf", data.output, data.chrom), 
+    let mut vcf_writer = bcf::Writer::from_path(data.vcf_out.to_string(), 
         &new_header, true, Format::Vcf)?;
     let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
     vcf_reader.fetch(chrom, 0, None)?;  // skip to chromosome for this thread
@@ -202,18 +269,14 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<MoleculeAllelesWrapp
                 &mut new_rec
             );
         }
-        if i > 10{ return Ok(MoleculeAllelesWrapper { // TODO change to moleculeallelewrapper
-            hic_alleles: None,
-            long_read_alleles: None,
-            linked_read_alleles: None,
-        }); }
+        if i > 10 { break; } //TODO remove, for small example
     }
     println!("done, saw {} records of which {} were hets in chrom {}", total, hets, data.chrom);
-    Ok(MoleculeAllelesWrapper { // TODO change to moleculeallelewrapper
-        hic_alleles: None,
-        long_read_alleles: None,
-        linked_read_alleles: None,
-    })
+    Command::new("bgzip").args(&[data.vcf_out.to_string()])
+        .output().expect("could not run bgzip");
+    Command::new("tabix").args(&["-p", "vcf", &format!("{}.gz", data.vcf_out)]).output().expect("could not tabix index vcf");
+    fs::File::create(data.vcf_out_done.to_string())?;
+    Ok(())
 }
 
 fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record) {
@@ -454,31 +517,9 @@ fn get_variant_assignments<'a> (
                 let alt_alignment = aligner.local(&seq, &alt_sequence);
                 if ref_alignment.score > alt_alignment.score {
                     read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtff").to_string());
-                    match &mut molecule_alleles.long_read_assignments {
-                        Some(long_read_assignment) => {
-                            let readdata = long_read_assignment.entry(std::str::from_utf8(rec.qname()).expect("readname fail").to_string()).or_insert(Vec::new());
-                            readdata.push(Allele{
-                                locus: pos,
-                                allele: true,
-                            });
-                        },
-                        None => (),
-                    }
                 } else if alt_alignment.score > ref_alignment.score {
                     read_names_alt.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
-                    match &mut molecule_alleles.long_read_assignments {
-                        Some(long_read_assignment) => {
-                            let readdata = long_read_assignment.entry(std::str::from_utf8(rec.qname()).expect("readname fail").to_string()).or_insert(Vec::new());
-                            readdata.push(Allele{
-                                locus: pos,
-                                allele: false,
-                            });
-                        },
-                        None => (),
-                    }
-                } else {
-                    //println!("\nread had equal alignment scores ref {} alt {}", ref_allele, alt_allele);
-                }
+                } 
             }
             
             let concat_ref = read_names_ref.join(";");
@@ -489,6 +530,7 @@ fn get_variant_assignments<'a> (
         }
         None => (),
     }
+
 }
 
 fn is_heterozygous(gt: bcf::record::Genotype) -> bool {
@@ -520,10 +562,6 @@ struct MoleculeAlleleWrapper {
     hic_read_assignments: Option<HashMap<String, Vec<Allele>>>,
 }
 
-struct Allele {
-    locus: usize,
-    allele: bool, // ref is 0 and alt is 1
-}
 
 
 
@@ -548,6 +586,11 @@ struct ThreadData {
     min_base_qual: u8,
     window: usize,
     output: String,
+    vcf_out: String,
+    vcf_out_done: String,
+    phasing_window: usize,
+    seed: u8,
+    ploidy: usize,
 }
 
 #[derive(Clone)]
@@ -557,7 +600,6 @@ struct Params {
     long_read_bam: Option<String>,
     output: String,
     seed: u8,
-    restarts: u32,
     threads: usize,
     fasta: String,
     ploidy: usize,
@@ -565,6 +607,7 @@ struct Params {
     min_mapq: u8,
     min_base_qual: u8,
     window: usize,
+    phasing_window: usize,
 }
 
 fn load_params() -> Params {
@@ -585,28 +628,29 @@ fn load_params() -> Params {
         None => None,
     };
 
-    let threads = params.value_of("threads").unwrap_or("1");
+    let threads = params.value_of("threads").unwrap();
     let threads = threads.to_string().parse::<usize>().unwrap();
 
-    let seed = params.value_of("seed").unwrap_or("4"); // 4 is guarranteed random by dice roll https://xkcd.com/221/
+    let seed = params.value_of("seed").unwrap(); 
     let seed = seed.to_string().parse::<u8>().unwrap();
 
-    let min_mapq = params.value_of("min_mapq").unwrap_or("30");
+    let min_mapq = params.value_of("min_mapq").unwrap();
     let min_mapq = min_mapq.to_string().parse::<u8>().unwrap();
     
-    let min_base_qual = params.value_of("min_base_qual").unwrap_or("20");
+    let min_base_qual = params.value_of("min_base_qual").unwrap();
     let min_base_qual = min_base_qual.to_string().parse::<u8>().unwrap();
-
-    let restarts = params.value_of("restarts").unwrap_or("10");
-    let restarts = restarts.to_string().parse::<u32>().unwrap();
 
     let fasta = params.value_of("fasta").unwrap();
 
-    let ploidy = params.value_of("ploidy").unwrap_or("2");
+    let ploidy = params.value_of("ploidy").unwrap();
     let ploidy = ploidy.to_string().parse::<usize>().unwrap();
 
-    let allele_alignment_window = params.value_of("ploidy").unwrap_or("200");
+    let allele_alignment_window = params.value_of("ploidy").unwrap();
     let allele_alignment_window = allele_alignment_window.to_string().parse::<usize>().unwrap();
+
+    let phasing_window = params.value_of("phasing_window").unwrap();
+    let phasing_window = phasing_window.to_string().parse::<usize>().unwrap();
+
 
     let vcf = params.value_of("vcf").unwrap();
 
@@ -620,9 +664,9 @@ fn load_params() -> Params {
         fasta: fasta.to_string(),
         ploidy: ploidy,
         vcf: vcf.to_string(),
-        restarts: restarts,
         min_mapq: min_mapq,
         min_base_qual: min_base_qual,
         window: allele_alignment_window,
+        phasing_window: phasing_window,
     }
 }

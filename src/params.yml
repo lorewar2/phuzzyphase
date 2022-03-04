@@ -13,11 +13,13 @@ args:
         long: min_mapq
         takes_value: true
         required: false
+        default_value: "30"
         help: minimum mapq reads to use (default 30)
     - min_base_qual:
         long: min_base_qual
         takes_value: true
         required: false
+        default_value: "20"
         help: minimum base quality to trust (default 20)
     - vcf:
         long: vcf
@@ -47,18 +49,15 @@ args:
         long: threads
         required: false
         takes_value: true
-        help: max number of threads.
+        default_value: "1"
+        help: max number of threads (default 1).
     - seed:
         short: s
         long: seed
         required: false
         takes_value: true
-        help: random seed
-    - restarts:
-        long: restarts
-        required: false
-        takes_value: true
-        help: number of random restarts
+        default_value: "4"
+        help: random seed, default is 4, guarranteed random by dice roll https://xkcd.com/221/
     - fasta:
         short: f
         long: assembly_fasta
@@ -70,10 +69,17 @@ args:
         long: ploidy
         required: false
         help: ploidy of organism, default 2
+        default_value: "2"
         takes_value: true
     - allele_alignment_window:
         long: allele_alignment_window
         required: false
         takes_value: true
+        default_value: "200"
         help: window on either side of an allele to use for alignment when determinging which allele a read supports
-        
+    - phasing_window:
+        long: phasing_window
+        required: false
+        takes_value: true
+        default_value: "20000"
+        help: base window for phasing solution in sliding window (default 20kb)
