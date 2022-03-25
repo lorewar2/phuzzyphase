@@ -9,6 +9,7 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
 use std::process::Command;
+use std::{thread, time};
 
 
 use bio::alignment::pairwise::banded;
@@ -137,52 +138,216 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}.gz",data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
     let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes()).expect("cant get chrom rid");
-    let cluster_centers = init_cluster_centers(&mut vcf_reader, &data);
-    let mut window_start: usize = 0;
-    let mut window_end: usize = data.phasing_window;
-    
-    while (window_start as u64) < data.chrom_length {
+    let (num_variants, last_position) = inspect_vcf(&mut vcf_reader, &data);
+    let mut cluster_centers = init_cluster_centers(num_variants, &data);
+    let mut window_start: usize = 60000; //TODO dont do this lol, for testing
+    let mut window_end: usize = 60000+data.phasing_window;
+    let mut position_to_index: HashMap<usize, usize> = HashMap::new();
+    let mut position_so_far: usize = 0;
+    let mut cluster_center_delta: f32 = 10.0;
+    while (window_start as u64) < data.chrom_length && window_start < last_position as usize {
         
-        vcf_reader.fetch(chrom, window_start as u64, Some(window_end as u64))?;
-        let molecules = get_molecules(&mut vcf_reader);
+        vcf_reader.fetch(chrom, window_start as u64, Some(window_end as u64)).expect("some actual error");
+        println!("fetching region {}:{}-{}", data.chrom, window_start, window_end);
+        let molecules = get_long_read_molecules(&mut vcf_reader, &mut position_to_index, &mut position_so_far);
+
+        let mut iteration = 0;
+        for haplotype in 0..cluster_centers.len() {
+            print!("haplotype {}\t", haplotype);
+            for variant in 0..10 {
+                print!("var{}:{} | ", variant, cluster_centers[haplotype][variant]);
+            }println!();
+        }
+        while cluster_center_delta > 0.01 {
+            let posteriors = expectation(&molecules, &cluster_centers);
+            cluster_center_delta = maximization(&molecules, posteriors, &mut cluster_centers);
+            for haplotype in 0..cluster_centers.len() {
+                print!("haplotype {}\t", haplotype);
+                for variant in 0..10 {
+                    print!("var{}:{} | ", variant, cluster_centers[haplotype][variant]);
+                }println!();
+            }
+            println!("cluster center delta {}", cluster_center_delta);
+            iteration += 1;
+        }
+        println!("converged in {} iterations", iteration);
+        for haplotype in 0..cluster_centers.len() {
+            print!("haplotype {}\t", haplotype);
+            for variant in 0..10 {
+                print!("var{}:{} | ", variant, cluster_centers[haplotype][variant]);
+            }println!();
+        }
         window_start += data.phasing_window/4;
+        window_start = window_start.min(last_position as usize);
         window_end += data.phasing_window/4;
+        window_end = window_end.min(last_position as usize);
+        //break;
     }
     
     Ok(())
 }
 
-fn get_molecules(vcf: &mut bcf::IndexedReader) -> HashMap<String, Vec<Allele>> {
+fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>, cluster_centers: &mut Vec<Vec<f32>>) -> f32 {
+    let mut updates: HashMap<usize, Vec<(f32, f32)>> = HashMap::new(); // variant index to vec across 
+    let mut variant_molecule_count: HashMap<usize, usize> = HashMap::new();
+    // haplotype clusters to a tuple of (numerator, denominator)
+    for molecule_index in 0..molecules.len() {
+        // if molecule does not support any haplotype over another, dont use it in maximization
+        let mut different = false;
+        for haplotype in 0..cluster_centers.len() {
+            if posteriors[molecule_index][haplotype] != posteriors[molecule_index][0] { 
+                different = true; 
+            }
+        }
+        if !different { continue; }
+        for allele in &molecules[molecule_index] {
+            let variant_index = allele.index;
+            let alt = allele.allele;
+            let count = variant_molecule_count.entry(variant_index).or_insert(0);
+            *count += 1;
+            for haplotype in 0..cluster_centers.len() {
+                let posterior = posteriors[molecule_index][haplotype];
+                let numerators_denominators = updates.entry(variant_index).or_insert(vec![(0.0, 0.0); cluster_centers.len()]);
+                if alt {
+                    numerators_denominators[haplotype].0 += posterior;
+                    numerators_denominators[haplotype].1 += posterior;
+                } else {
+                    numerators_denominators[haplotype].1 += posterior;
+                }
+            }
+        }
+    }
+    let mut total_change = 0.0;
+    for (variant_index, haplotypes) in updates.iter() {
+        if variant_molecule_count.get(variant_index).unwrap() > &3 { //TODO Dont hard code stuff
+            for haplotype in 0..haplotypes.len() {
+                let numerators_denominators = haplotypes[haplotype];
+                let allele_fraction = (numerators_denominators.0 / numerators_denominators.1).max(0.001).min(0.999);
+                total_change += (allele_fraction - cluster_centers[haplotype][*variant_index]).abs();
+                cluster_centers[haplotype][*variant_index] = allele_fraction;
+            }
+        }
+    }
+    total_change
+}
+
+// molecules is vec of molecules each a vec of alleles
+// cluster centers is vec of haplotype clusters  by variant loci
+// posteriors (return value) is molecules by clusters to posterior probability
+fn expectation(molecules: &Vec<Vec<Allele>>, cluster_centers: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+    let mut posteriors: Vec<Vec<f32>> = Vec::new();
+
+    for molecule in molecules.iter() {
+        let mut log_probs: Vec<f32> = Vec::new(); // for each haplotype
+        for haplotype in 0..cluster_centers.len() {
+            let mut log_prob = 0.0; // log(0) = probability 1
+            for allele in molecule.iter() {
+                if allele.allele { // alt allele
+                    log_prob += cluster_centers[haplotype][allele.index].ln();// adding in log space, multiplying in probability space
+                } else {
+                    log_prob += (1.0 - cluster_centers[haplotype][allele.index]).ln();
+                }
+            }
+            log_probs.push(log_prob);
+        }
+        let bayes_log_denom = log_sum_exp(&log_probs);
+        let mut mol_posteriors: Vec<f32> = Vec::new();
+
+        for log_prob in log_probs {
+            mol_posteriors.push((log_prob - bayes_log_denom).exp());
+        }
+        
+        posteriors.push(mol_posteriors);
+    }
+    posteriors
+}
+
+fn log_sum_exp(p: &Vec<f32>) -> f32 {
+    let max_p: f32 = p.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let sum_rst: f32 = p.iter().map(|x| (x - max_p).exp()).sum();
+    max_p + sum_rst.ln()
+}
+
+fn get_long_read_molecules(vcf: &mut bcf::IndexedReader, 
+        position_to_index: &mut HashMap<usize, usize>,
+        position_so_far: &mut usize) -> Vec<Vec<Allele>> {
     let mut molecules: HashMap<String, Vec<Allele>> = HashMap::new();
+    println!("check");
     for rec in vcf.records() {
         let rec = rec.expect("couldnt unwrap record");
-        let ref_molecules_string = rec.format(b"RM");
-        let alt_molecules_string = rec.format(b"AM");
+        let pos = rec.pos();
+        let var_index = position_to_index.entry(pos as usize).or_insert(*position_so_far);
+        *position_so_far += 1;
+        println!("pos {}", pos);
+        match rec.format(b"RM").string() {
+            Ok(rec_format) => {
+                for rec in rec_format.iter() {
+                    let ref_mols = std::str::from_utf8(rec).expect(":").to_string();
+                    for read in ref_mols.split(";") {
+                        let mol = molecules.entry(read.to_string()).or_insert(Vec::new());
+                        mol.push(Allele{index: *var_index, allele: false});
+                    }
+                }
+            },
+            Err(_) => println!("fail"),
+        }
+        match rec.format(b"AM").string() {
+            Ok(rec_format) => {
+                for rec in rec_format.iter() {
+                    let alt_mols = std::str::from_utf8(rec).expect(":").to_string();
+                    for read in alt_mols.split(";") {
+                        let mol = molecules.entry(read.to_string()).or_insert(Vec::new());
+                        mol.push(Allele{index: *var_index, allele: true});
+                    }
+                }
+            },
+            Err(_) => println!("fail"),
+        }
     }
-    molecules
+    println!("check2");
+    let mut to_return: Vec<Vec<Allele>> = Vec::new();
+    for (_read_name, alleles) in molecules.iter() {
+        if alleles.len() < 2 { continue; }
+        let mut mol: Vec<Allele> = Vec::new();
+        for allele in alleles {
+            mol.push(*allele);
+        }
+        to_return.push(mol);
+    }
+    to_return
 }
 
+#[derive(Clone,Copy)]
 struct Allele {
     index:  usize,
-    allele: bool, // alt is 1, ref is 0
+    allele: bool, // alt is true, ref is false
 }
 
-fn init_cluster_centers(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> Vec<Vec<f64>> {
+
+fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> (usize, i64) {
     let chrom = vcf.header().name2rid(data.chrom.as_bytes()).expect("cant get chrom rid");
     vcf.fetch(chrom, 0, None).expect("could not fetch in vcf");
     let mut num = 0;
+    let mut last_pos = 0;
     for r in vcf.records() {
         num += 1;
+        let rec = r.expect("could not unwrap vcf record");
+        last_pos = rec.pos();
     }
+    println!("vcf has {} variants for chrom {}", num, chrom);
+    (num, last_pos)
+}
+
+fn init_cluster_centers(num: usize, data: &ThreadData) -> Vec<Vec<f32>> {
     let seed = [data.seed; 32];
     let mut rng: StdRng = SeedableRng::from_seed(seed);
-    let mut cluster_centers: Vec<Vec<f64>> = Vec::new();
+    let mut cluster_centers: Vec<Vec<f32>> = Vec::new();
     for k in 0..data.ploidy {
-        let mut cluster_center: Vec<f64> = Vec::new();
+        let mut cluster_center: Vec<f32> = Vec::new();
         for v in 0..num {
             cluster_center.push(0.5);
         }
-        cluster_center[0] = rng.gen::<f64>().min(0.98).max(0.02);
+        cluster_center[0] = rng.gen::<f32>().min(0.98).max(0.02);
         cluster_centers.push(cluster_center);
     }
     cluster_centers
@@ -269,12 +434,18 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
                 &mut new_rec
             );
         }
-        if i > 10 { break; } //TODO remove, for small example
+        if hets > 200 { break; } //TODO remove, for small example
     }
     println!("done, saw {} records of which {} were hets in chrom {}", total, hets, data.chrom);
-    Command::new("bgzip").args(&[data.vcf_out.to_string()])
-        .output().expect("could not run bgzip");
-    Command::new("tabix").args(&["-p", "vcf", &format!("{}.gz", data.vcf_out)]).output().expect("could not tabix index vcf");
+    let output = Command::new("bgzip").arg(&data.vcf_out.to_string()).
+        output().expect("lkjfd");
+    //let result = cmd1.wait().expect("could not run bgzip");
+    println!("{}", output.status.success());
+
+    let output = Command::new("tabix").args(&["-p", "vcf", &format!("{}.gz", data.vcf_out)]).
+       output().expect("why");
+    //let result = cmd2.wait().expect("could not tabix index vcf");
+    //println!("{}", output.status);
     fs::File::create(data.vcf_out_done.to_string())?;
     Ok(())
 }
@@ -459,7 +630,7 @@ fn get_variant_assignments<'a> (
             fasta.fetch(chrom, ref_start, ref_end).expect("fasta fetch failed");
             let mut ref_sequence: Vec<u8> = Vec::new();
             fasta.read(&mut ref_sequence).expect("failed to read fasta sequence");
-
+            //if pos == 69505 { println!("yes, this one"); }
             let mut alt_sequence: Vec<u8> = Vec::new();
             for i in 0..window as usize {
                 alt_sequence.push(ref_sequence[i]);
@@ -476,20 +647,20 @@ fn get_variant_assignments<'a> (
             let mut read_names_alt: Vec<String> = Vec::new();
             for _rec in bam.records() {
                 let rec = _rec.expect("cannot read bam record");
-                //println!("\n{}", std::str::from_utf8(rec.qname()).unwrap());
+                //if pos == 69505 {println!("testing molecule");}
                 if rec.mapq() < min_mapq {
-                    //println!("low mapq {}", rec.mapq());
                     continue
                 }
                 if rec.is_secondary() || rec.is_supplementary() {
-                    //println!("not primary alignment");
                     continue;
                 }
                 let mut read_start: Option<usize> = None; // I am lazy and for some reason dont know how to do things, so this is my bad solution
                 let mut read_end: usize = rec.seq_len();
                 let mut min_bq = 93;
                 let qual = rec.qual();
+                //println!("ref_start {} ref_end {}", ref_start, ref_end);
                 for pos_pair in rec.aligned_pairs() {
+                    //println!("\t{},{}",pos_pair[0],pos_pair[1]);
                     if (pos_pair[1] as u64) >= ref_start && (pos_pair[1] as u64) < ref_end {
                         if pos_pair[1] as usize >= pos && pos_pair[1] as usize <= pos + ref_allele.len().max(alt_allele.len()) {
                             min_bq = min_bq.min(qual[pos_pair[0] as usize]);
@@ -501,8 +672,8 @@ fn get_variant_assignments<'a> (
                         }
                     } 
                 }
+                
                 if min_bq < min_base_qual {
-                    //println!("low base quality {}",min_bq);
                     continue;
                 }
                 if read_start == None {
@@ -520,12 +691,15 @@ fn get_variant_assignments<'a> (
                 } else if alt_alignment.score > ref_alignment.score {
                     read_names_alt.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
                 } 
+                //if pos == 69505 { println!("scores {} and {}",ref_alignment.score, alt_alignment.score);
+                //println!("read_names_ref {}, read_names_alt {}", read_names_ref.len(), read_names_alt.len()); }
             }
             
             let concat_ref = read_names_ref.join(";");
             let concat_alt = read_names_alt.join(";");
-            vcf_record.push_format_string(b"AM", &[concat_ref.as_bytes()]).expect("blarg");
-            vcf_record.push_format_string(b"RM",&[concat_ref.as_bytes()]).expect("gggg");
+            //if pos == 69505 { println!("{} {}", concat_ref, concat_alt); }
+            vcf_record.push_format_string(b"AM", &[concat_alt.as_bytes()]).expect("blarg");
+            vcf_record.push_format_string(b"RM", &[concat_ref.as_bytes()]).expect("gggg");
             vcf_writer.write(vcf_record).expect("nope");
         }
         None => (),
@@ -645,7 +819,7 @@ fn load_params() -> Params {
     let ploidy = params.value_of("ploidy").unwrap();
     let ploidy = ploidy.to_string().parse::<usize>().unwrap();
 
-    let allele_alignment_window = params.value_of("ploidy").unwrap();
+    let allele_alignment_window = params.value_of("allele_alignment_window").unwrap();
     let allele_alignment_window = allele_alignment_window.to_string().parse::<usize>().unwrap();
 
     let phasing_window = params.value_of("phasing_window").unwrap();
