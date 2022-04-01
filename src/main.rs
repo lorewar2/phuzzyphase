@@ -24,6 +24,8 @@ use rust_htslib::bcf::{self, Read as BcfRead};
 use rust_htslib::bcf::{Format};
 use std::path::Path;
 use std::fs;
+use std::fs::File;
+use std::io::Write;
 use std::convert::TryInto;
 
 
@@ -437,13 +439,28 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
         if hets > 200 { break; } //TODO remove, for small example
     }
     println!("done, saw {} records of which {} were hets in chrom {}", total, hets, data.chrom);
-    let output = Command::new("bgzip").arg(&data.vcf_out.to_string()).
-        output().expect("lkjfd");
+    //let output = Command::new("bgzip").arg(&data.vcf_out.to_string()).
+    //    output().expect("lkjfd");
+    let command = format!("#!/bin/bash\nbgzip -c {} > {}.gz && tabix -p vcf {}.gz", data.vcf_out, data.vcf_out, data.vcf_out);
+    
+    let index_script = format!("{}/index_{}.sh", data.output, data.chrom);
+    println!("{}", &index_script);
+    let mut f = File::create(&index_script).expect("Unable to create file");
+    f.write_all(command.as_bytes()).expect("Unable to write data");
+    println!("{}", format!("chmod 777 {}", &index_script));
+    Command::new("chmod").args(&["777",&index_script]).output().expect("chmod?");
+    Command::new(&format!("./{}", &index_script)).output().expect("seriously?");
+    Command::new("rm").arg(&index_script).output().expect("cant delete");
+    //let output = Command::new("bcftools").
+    //    args(&["view", &data.vcf_out, "-Oz", "-o", &format!("{}.gz", data.vcf_out)]).
+    //    output().expect("lkjf");
     //let result = cmd1.wait().expect("could not run bgzip");
-    println!("{}", output.status.success());
+    //println!("{}", output.status.success());
 
-    let output = Command::new("tabix").args(&["-p", "vcf", &format!("{}.gz", data.vcf_out)]).
-       output().expect("why");
+    //let output = Command::new("tabix").args(&["-p", "vcf", &format!("{}.gz", data.vcf_out)]).
+    //   output().expect("why");
+    //let output = Command::new("bcftools").args(&["index", &format!("{}.gz", data.vcf_out)]).
+    //    output().expect("lkkll");
     //let result = cmd2.wait().expect("could not tabix index vcf");
     //println!("{}", output.status);
     fs::File::create(data.vcf_out_done.to_string())?;
