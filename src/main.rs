@@ -15,12 +15,14 @@ use std::{thread, time};
 use bio::alignment::pairwise::banded;
 use bio::io::fasta;
 use bio::utils::TextSlice;
+
 use failure::{Error, ResultExt};
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
 use rust_htslib::bam::{self, Read, Record};
 use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bcf::{self, Read as BcfRead};
+use rust_htslib::bcf::record::GenotypeAllele;
 use rust_htslib::bcf::{Format};
 use std::path::Path;
 use std::fs;
@@ -109,8 +111,8 @@ fn _main() -> Result<(), Error> {
             chrom_length: chrom_lengths[i],
             window: params.window,
             output: params.output.to_string(),
-            vcf_out: format!("{}/chrom_{}.vcf", params.output, chrom),
-            vcf_out_done: format!("{}/chrom_{}.vcf.done", params.output, chrom),
+            vcf_out: format!("{}/chrom_{}.bcf", params.output, chrom),
+            vcf_out_done: format!("{}/chrom_{}.bcf.done", params.output, chrom),
             phasing_window: params.phasing_window,
             seed: params.seed,
             ploidy: params.ploidy,
@@ -130,6 +132,13 @@ fn _main() -> Result<(), Error> {
     Ok(())
 }
 
+struct PhaseBlock {
+    start_index: usize,
+    start_position: usize,
+    end_index: usize,
+    end_position: usize,
+}
+
 fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     println!("thread {} chrom {}", data.index, data.chrom);
     
@@ -137,61 +146,155 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         get_all_variant_assignments(data);
     }
     
-    let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}.gz",data.vcf_out.to_string()))
+    let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}",data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
     let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes()).expect("cant get chrom rid");
-    let (num_variants, last_position) = inspect_vcf(&mut vcf_reader, &data);
-    let mut cluster_centers = init_cluster_centers(num_variants, &data);
-    let mut window_start: usize = 60000; //TODO dont do this lol, for testing
-    let mut window_end: usize = 60000+data.phasing_window;
-    let mut position_to_index: HashMap<usize, usize> = HashMap::new();
-    let mut position_so_far: usize = 0;
-    let mut cluster_center_delta: f32 = 10.0;
-    while (window_start as u64) < data.chrom_length && window_start < last_position as usize {
-        
+    let vcf_info = inspect_vcf(&mut vcf_reader, &data);
+    let mut cluster_centers = init_cluster_centers(vcf_info.num_variants, &data);
+    let mut window_start: usize = 0; 
+    let mut window_end: usize = data.phasing_window;
+    //let mut position_to_index: HashMap<usize, usize> = HashMap::new();
+    //let mut position_so_far: usize = 0;
+    let mut phase_blocks: Vec<PhaseBlock> = Vec::new();
+    let mut phase_block_start: usize = 0;
+    let mut last_attempted_index: usize = 0;
+    let mut in_phaseblock = false;
+    eprintln!("{}", vcf_info.final_position);
+    'outer: while (window_start as u64) < data.chrom_length && 
+            window_start < vcf_info.final_position as usize {
+
+        let mut cluster_center_delta: f32 = 10.0;
         vcf_reader.fetch(chrom, window_start as u64, Some(window_end as u64)).expect("some actual error");
         println!("fetching region {}:{}-{}", data.chrom, window_start, window_end);
-        let molecules = get_long_read_molecules(&mut vcf_reader, &mut position_to_index, &mut position_so_far);
-
+        let molecules = get_long_read_molecules(&mut vcf_reader, &vcf_info);
+        //, &mut position_to_index, &mut position_so_far);
+        println!("{} molecules", molecules.len());
         let mut iteration = 0;
-        for haplotype in 0..cluster_centers.len() {
-            print!("haplotype {}\t", haplotype);
-            for variant in 0..10 {
-                print!("var{}:{} | ", variant, cluster_centers[haplotype][variant]);
-            }println!();
-        }
+        let mut min_index: usize = 0;
+        let mut max_index: usize  = 0;
+        
         while cluster_center_delta > 0.01 {
-            let posteriors = expectation(&molecules, &cluster_centers);
-            cluster_center_delta = maximization(&molecules, posteriors, &mut cluster_centers);
-            for haplotype in 0..cluster_centers.len() {
-                print!("haplotype {}\t", haplotype);
-                for variant in 0..10 {
-                    print!("var{}:{} | ", variant, cluster_centers[haplotype][variant]);
-                }println!();
+            let (breaking_point, posteriors) = expectation(&molecules, &cluster_centers);
+            if in_phaseblock && breaking_point {
+                println!("BREAKING due to no posteriors differing... window {}-{}", window_start, window_end);
+                in_phaseblock = false;
+                while cluster_centers[0][last_attempted_index] == 0.5 {
+                    last_attempted_index -= 1;
+                }
+                phase_blocks.push(PhaseBlock{
+                    start_index: phase_block_start,
+                    start_position: vcf_info.variant_positions[phase_block_start],
+                    end_index: last_attempted_index, 
+                    end_position: vcf_info.variant_positions[last_attempted_index],
+                });
+                phase_block_start = last_attempted_index  + 1;
+                window_start = vcf_info.variant_positions[phase_block_start];
+                eprintln!("reseting window start to {}", window_start);
+                window_end = window_start + data.phasing_window;
+                let seed = [data.seed; 32];
+                let mut rng: StdRng = SeedableRng::from_seed(seed);
+                for haplotype in 0..cluster_centers.len() {
+                    cluster_centers[haplotype][phase_block_start] = rng.gen::<f32>().min(0.98).max(0.02);
+                }
+                println!("PHASE BLOCK ENDING {}-{}, {}-{}", phase_block_start, last_attempted_index, 
+                    vcf_info.variant_positions[phase_block_start], vcf_info.variant_positions[last_attempted_index]);
+                continue 'outer;
             }
-            println!("cluster center delta {}", cluster_center_delta);
+            cluster_center_delta = maximization(&molecules, posteriors, &mut cluster_centers, &mut min_index, &mut max_index);
+            if max_index != 0 {
+                last_attempted_index = max_index;
+                if !in_phaseblock {
+                    phase_block_start = min_index;
+                }
+                in_phaseblock = true;
+            }
+            
+            //for haplotype in 0..cluster_centers.len() {
+            //    print!("haplotype {}\t", haplotype);
+            //    for variant in min_index..max_index {
+             //       print!("var{}:{} | ", variant, cluster_centers[haplotype][variant]);
+            //    }println!();
+            //}
             iteration += 1;
         }
-        println!("converged in {} iterations", iteration);
+        println!("converged in {} iterations, min {} max {}", iteration, min_index, max_index);
         for haplotype in 0..cluster_centers.len() {
             print!("haplotype {}\t", haplotype);
-            for variant in 0..10 {
-                print!("var{}:{} | ", variant, cluster_centers[haplotype][variant]);
+            for variant in min_index..max_index {
+                print!("var{},{}:{} | ", variant, vcf_info.variant_positions[variant], cluster_centers[haplotype][variant]);
             }println!();
         }
         window_start += data.phasing_window/4;
-        window_start = window_start.min(last_position as usize);
+        window_start = window_start.min(vcf_info.final_position as usize);
+        eprintln!("moving window start to {}", window_start);
         window_end += data.phasing_window/4;
-        window_end = window_end.min(last_position as usize);
+        window_end = window_end.min(vcf_info.final_position as usize);
         //break;
     }
+
+    phase_blocks.push(PhaseBlock{
+        start_index: phase_block_start,
+        start_position: vcf_info.variant_positions[phase_block_start],
+        end_index: last_attempted_index, 
+        end_position: vcf_info.variant_positions[last_attempted_index],
+    });
     
+    println!("DONE!");
+    for (id, phase_block) in phase_blocks.iter().enumerate() {
+        println!("phase block {} from {}-{}, {}-{}", 
+            id, phase_block.start_position, phase_block.end_position, 
+            phase_block.start_index, phase_block.end_index);
+    }
+    output_phased_vcf(data, cluster_centers, phase_blocks);
     Ok(())
 }
 
-fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>, cluster_centers: &mut Vec<Vec<f32>>) -> f32 {
+fn output_phased_vcf(data: &ThreadData, cluster_centers: Vec<Vec<f32>>, phase_blocks: Vec<PhaseBlock>) {
+    let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}",data.vcf_out.to_string()))
+        .expect("could not open indexed vcf reader on output vcf");
+    let mut vcf_writer = bcf::Writer::from_path(format!("{}/phased_chrom_{}.bcf", data.output, data.chrom), 
+        &bcf::header::Header::from_template(vcf_reader.header()), 
+        false, Format::Bcf).expect("could not open vcf writer");
+    let mut index: usize = 0;
+    let mut index_to_phase_block: HashMap<usize, usize> = HashMap::new();
+    for (id, phase_block) in phase_blocks.iter().enumerate() {
+        for i in phase_block.start_index..(phase_block.end_index+1) {
+            index_to_phase_block.insert(i, id);
+        }
+    }
+    for r in vcf_reader.records() {
+        let mut rec = r.expect("could not unwrap vcf record");
+        //println!("{}",index);
+        let phase_block_id = index_to_phase_block.get(&index).expect("i had it coming");
+        let genotypes = infer_genotype(&cluster_centers, index);
+        rec.push_genotypes(&genotypes).expect("i did expect this error");
+        vcf_writer.write(&rec).expect("could not write record");
+        index += 1;
+    }
+}
+
+fn infer_genotype(cluster_centers: &Vec<Vec<f32>>, index: usize) -> Vec<GenotypeAllele> {
+    let mut genotypes: Vec<GenotypeAllele> = Vec::new();
+    for haplotype in 0..cluster_centers.len() {
+        if cluster_centers[haplotype][index] > 0.95 {
+            genotypes.push(GenotypeAllele::Phased(1));
+        } else if cluster_centers[haplotype][index] < 0.05 {
+            genotypes.push(GenotypeAllele::Phased(0));
+        } else if cluster_centers[haplotype][index] <= 0.5 {
+            genotypes.push(GenotypeAllele::Unphased(0));
+        } else {
+            genotypes.push(GenotypeAllele::Unphased(1));
+        }
+    }
+    genotypes
+}
+
+fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>, 
+    cluster_centers: &mut Vec<Vec<f32>>, min_index: &mut usize, max_index: &mut usize) -> f32 {
     let mut updates: HashMap<usize, Vec<(f32, f32)>> = HashMap::new(); // variant index to vec across 
     let mut variant_molecule_count: HashMap<usize, usize> = HashMap::new();
+    *min_index = std::usize::MAX;
+    *max_index = 0;
     // haplotype clusters to a tuple of (numerator, denominator)
     for molecule_index in 0..molecules.len() {
         // if molecule does not support any haplotype over another, dont use it in maximization
@@ -201,7 +304,10 @@ fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>, cluster
                 different = true; 
             }
         }
-        if !different { continue; }
+        if !different {
+            //println!("debug, molecule does not support any haplotype over another");
+            continue; 
+        }
         for allele in &molecules[molecule_index] {
             let variant_index = allele.index;
             let alt = allele.allele;
@@ -222,13 +328,17 @@ fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>, cluster
     let mut total_change = 0.0;
     for (variant_index, haplotypes) in updates.iter() {
         if variant_molecule_count.get(variant_index).unwrap() > &3 { //TODO Dont hard code stuff
+            *min_index = (*min_index).min(*variant_index);
+            *max_index = (*max_index).max(*variant_index);
             for haplotype in 0..haplotypes.len() {
                 let numerators_denominators = haplotypes[haplotype];
                 let allele_fraction = (numerators_denominators.0 / numerators_denominators.1).max(0.001).min(0.999);
                 total_change += (allele_fraction - cluster_centers[haplotype][*variant_index]).abs();
                 cluster_centers[haplotype][*variant_index] = allele_fraction;
+               
             }
-        }
+            
+        } 
     }
     total_change
 }
@@ -236,9 +346,9 @@ fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>, cluster
 // molecules is vec of molecules each a vec of alleles
 // cluster centers is vec of haplotype clusters  by variant loci
 // posteriors (return value) is molecules by clusters to posterior probability
-fn expectation(molecules: &Vec<Vec<Allele>>, cluster_centers: &Vec<Vec<f32>>) -> Vec<Vec<f32>> {
+fn expectation(molecules: &Vec<Vec<Allele>>, cluster_centers: &Vec<Vec<f32>>) -> (bool, Vec<Vec<f32>>) {
     let mut posteriors: Vec<Vec<f32>> = Vec::new();
-
+    let mut any_different = false;
     for molecule in molecules.iter() {
         let mut log_probs: Vec<f32> = Vec::new(); // for each haplotype
         for haplotype in 0..cluster_centers.len() {
@@ -259,9 +369,15 @@ fn expectation(molecules: &Vec<Vec<Allele>>, cluster_centers: &Vec<Vec<f32>>) ->
             mol_posteriors.push((log_prob - bayes_log_denom).exp());
         }
         
+        for haplotype in 0..cluster_centers.len() {
+            if mol_posteriors[haplotype] != mol_posteriors[0] { 
+                any_different = true; 
+            }
+        }
+        
         posteriors.push(mol_posteriors);
     }
-    posteriors
+    (!any_different, posteriors)
 }
 
 fn log_sum_exp(p: &Vec<f32>) -> f32 {
@@ -270,17 +386,25 @@ fn log_sum_exp(p: &Vec<f32>) -> f32 {
     max_p + sum_rst.ln()
 }
 
-fn get_long_read_molecules(vcf: &mut bcf::IndexedReader, 
-        position_to_index: &mut HashMap<usize, usize>,
-        position_so_far: &mut usize) -> Vec<Vec<Allele>> {
+fn get_long_read_molecules(vcf: &mut bcf::IndexedReader,
+        vcf_info: &VCF_info//, 
+        //position_to_index: &mut HashMap<usize, usize>,
+        //position_so_far: &mut usize
+    ) -> Vec<Vec<Allele>> {
     let mut molecules: HashMap<String, Vec<Allele>> = HashMap::new();
-    println!("check");
+
     for rec in vcf.records() {
         let rec = rec.expect("couldnt unwrap record");
         let pos = rec.pos();
-        let var_index = position_to_index.entry(pos as usize).or_insert(*position_so_far);
-        *position_so_far += 1;
-        println!("pos {}", pos);
+        let var_index = vcf_info.position_to_index.get(&(pos as usize)).expect("please don't do this to me");
+        //let mut update = true;
+        //if position_to_index.contains_key(&(pos as usize)) {
+        //    update = false;
+        //}
+        //let var_index = position_to_index.entry(pos as usize).or_insert(*position_so_far);
+        //if update {
+        //    *position_so_far += 1; 
+        //}
         match rec.format(b"RM").string() {
             Ok(rec_format) => {
                 for rec in rec_format.iter() {
@@ -306,7 +430,6 @@ fn get_long_read_molecules(vcf: &mut bcf::IndexedReader,
             Err(_) => println!("fail"),
         }
     }
-    println!("check2");
     let mut to_return: Vec<Vec<Allele>> = Vec::new();
     for (_read_name, alleles) in molecules.iter() {
         if alleles.len() < 2 { continue; }
@@ -325,19 +448,34 @@ struct Allele {
     allele: bool, // alt is true, ref is false
 }
 
+struct VCF_info {
+    num_variants: usize,
+    final_position: i64,
+    variant_positions: Vec<usize>,
+    position_to_index: HashMap<usize, usize>,
+}
 
-fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> (usize, i64) {
+fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
     let chrom = vcf.header().name2rid(data.chrom.as_bytes()).expect("cant get chrom rid");
     vcf.fetch(chrom, 0, None).expect("could not fetch in vcf");
+    let mut position_to_index: HashMap<usize, usize> = HashMap::new();
     let mut num = 0;
     let mut last_pos = 0;
+    let mut variant_positions: Vec<usize> = Vec::new();
     for r in vcf.records() {
-        num += 1;
         let rec = r.expect("could not unwrap vcf record");
         last_pos = rec.pos();
+        variant_positions.push(rec.pos() as usize);
+        position_to_index.insert(rec.pos() as usize, num);
+        num += 1;
     }
     println!("vcf has {} variants for chrom {}", num, chrom);
-    (num, last_pos)
+    VCF_info{
+        num_variants: num, 
+        final_position: last_pos, 
+        variant_positions: variant_positions,
+        position_to_index: position_to_index,
+    }
 }
 
 fn init_cluster_centers(num: usize, data: &ThreadData) -> Vec<Vec<f32>> {
@@ -393,9 +531,9 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
     new_header.push_record(br#"##FORMAT=<ID=AM,Number=1,Type=String,Description="alt molecules">"#);
     new_header.push_record(br#"##FORMAT=<ID=RM,Number=1,Type=String,Description="ref molecules">"#);
 
- 
+    { // creating my own scope to close later to close vcf writer
     let mut vcf_writer = bcf::Writer::from_path(data.vcf_out.to_string(), 
-        &new_header, true, Format::Vcf)?;
+        &new_header, false, Format::Bcf)?;
     let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
     vcf_reader.fetch(chrom, 0, None)?;  // skip to chromosome for this thread
     let mut total = 0;
@@ -436,36 +574,19 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
                 &mut new_rec
             );
         }
-        if hets > 200 { break; } //TODO remove, for small example
+        if hets > 2000 { break; } //TODO remove, for small example
     }
     println!("done, saw {} records of which {} were hets in chrom {}", total, hets, data.chrom);
-    //let output = Command::new("bgzip").arg(&data.vcf_out.to_string()).
-    //    output().expect("lkjfd");
-    let command = format!("#!/bin/bash\nbgzip -c {} > {}.gz && tabix -p vcf {}.gz", data.vcf_out, data.vcf_out, data.vcf_out);
-    
-    let index_script = format!("{}/index_{}.sh", data.output, data.chrom);
-    println!("{}", &index_script);
-    let mut f = File::create(&index_script).expect("Unable to create file");
-    f.write_all(command.as_bytes()).expect("Unable to write data");
-    println!("{}", format!("chmod 777 {}", &index_script));
-    Command::new("chmod").args(&["777",&index_script]).output().expect("chmod?");
-    Command::new(&format!("./{}", &index_script)).output().expect("seriously?");
-    Command::new("rm").arg(&index_script).output().expect("cant delete");
-    //let output = Command::new("bcftools").
-    //    args(&["view", &data.vcf_out, "-Oz", "-o", &format!("{}.gz", data.vcf_out)]).
-    //    output().expect("lkjf");
-    //let result = cmd1.wait().expect("could not run bgzip");
-    //println!("{}", output.status.success());
 
-    //let output = Command::new("tabix").args(&["-p", "vcf", &format!("{}.gz", data.vcf_out)]).
-    //   output().expect("why");
-    //let output = Command::new("bcftools").args(&["index", &format!("{}.gz", data.vcf_out)]).
-    //    output().expect("lkkll");
-    //let result = cmd2.wait().expect("could not tabix index vcf");
-    //println!("{}", output.status);
+    } //creating my own scope to close vcf
+
+    let result = Command::new("bcftools").args(&["index","-f", &data.vcf_out]).status().expect("bcftools failed us");
+
     fs::File::create(data.vcf_out_done.to_string())?;
     Ok(())
 }
+
+
 
 fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record) {
     new_rec.set_rid(rec.rid());

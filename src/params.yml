@@ -75,7 +75,7 @@ args:
         long: allele_alignment_window
         required: false
         takes_value: true
-        default_value: "200"
+        default_value: "50"
         help: window on either side of an allele to use for alignment when determinging which allele a read supports
     - phasing_window:
         long: phasing_window
