@@ -4,6 +4,7 @@ extern crate bio;
 extern crate hashbrown;
 extern crate rand;
 extern crate rayon;
+extern crate statrs;
 
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -11,7 +12,7 @@ use rand::SeedableRng;
 use std::process::Command;
 use std::{thread, time};
 
-
+use statrs::distribution::{Binomial};
 use bio::alignment::pairwise::banded;
 use bio::io::fasta;
 use bio::utils::TextSlice;
@@ -19,17 +20,16 @@ use bio::utils::TextSlice;
 use failure::{Error, ResultExt};
 use flate2::read::MultiGzDecoder;
 use rayon::prelude::*;
-use rust_htslib::bam::{self, Read, Record};
 use rust_htslib::bam::ext::BamRecordExtensions;
-use rust_htslib::bcf::{self, Read as BcfRead};
+use rust_htslib::bam::{self, Read, Record};
 use rust_htslib::bcf::record::GenotypeAllele;
-use rust_htslib::bcf::{Format};
-use std::path::Path;
+use rust_htslib::bcf::Format;
+use rust_htslib::bcf::{self, Read as BcfRead};
+use std::convert::TryInto;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
-use std::convert::TryInto;
-
+use std::path::Path;
 
 use hashbrown::{HashMap, HashSet};
 
@@ -72,7 +72,7 @@ fn _main() -> Result<(), Error> {
     } else {
         fs::create_dir(params.output.to_string())?;
     }
-    
+
     let fai = params.fasta.to_string() + ".fai";
     let fa_index_iter = fasta::Index::from_file(&fai)
         .expect(&format!("error opening fasta index: {}", fai))
@@ -92,10 +92,6 @@ fn _main() -> Result<(), Error> {
         let data = ThreadData {
             index: i,
             long_read_bam: match &params.long_read_bam {
-                Some(x) => Some(x.to_string()),
-                None => None,
-            },
-            linked_read_bam: match &params.linked_read_bam {
                 Some(x) => Some(x.to_string()),
                 None => None,
             },
@@ -141,17 +137,20 @@ struct PhaseBlock {
 
 fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     println!("thread {} chrom {}", data.index, data.chrom);
-    
+
     if !Path::new(&data.vcf_out_done).exists() {
         get_all_variant_assignments(data);
     }
-    
-    let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}",data.vcf_out.to_string()))
+
+    let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
-    let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes()).expect("cant get chrom rid");
+    let chrom = vcf_reader
+        .header()
+        .name2rid(data.chrom.as_bytes())
+        .expect("cant get chrom rid");
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let mut cluster_centers = init_cluster_centers(vcf_info.num_variants, &data);
-    let mut window_start: usize = 0; 
+    let mut window_start: usize = 0;
     let mut window_end: usize = data.phasing_window;
     //let mut position_to_index: HashMap<usize, usize> = HashMap::new();
     //let mut position_so_far: usize = 0;
@@ -160,47 +159,66 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     let mut last_attempted_index: usize = 0;
     let mut in_phaseblock = false;
     eprintln!("{}", vcf_info.final_position);
-    'outer: while (window_start as u64) < data.chrom_length && 
-            window_start < vcf_info.final_position as usize {
-
+    'outer: while (window_start as u64) < data.chrom_length
+        && window_start < vcf_info.final_position as usize
+    {
         let mut cluster_center_delta: f32 = 10.0;
-        vcf_reader.fetch(chrom, window_start as u64, Some(window_end as u64)).expect("some actual error");
-        println!("fetching region {}:{}-{}", data.chrom, window_start, window_end);
-        let molecules = get_long_read_molecules(&mut vcf_reader, &vcf_info);
-        //, &mut position_to_index, &mut position_so_far);
+        vcf_reader
+            .fetch(chrom, window_start as u64, Some(window_end as u64))
+            .expect("some actual error");
+        println!(
+            "fetching region {}:{}-{}",
+            data.chrom, window_start, window_end
+        );
+        let molecules = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIFI);
         println!("{} molecules", molecules.len());
         let mut iteration = 0;
         let mut min_index: usize = 0;
-        let mut max_index: usize  = 0;
-        
+        let mut max_index: usize = 0;
+
         while cluster_center_delta > 0.01 {
             let (breaking_point, posteriors) = expectation(&molecules, &cluster_centers);
             if in_phaseblock && breaking_point {
-                println!("BREAKING due to no posteriors differing... window {}-{}", window_start, window_end);
+                println!(
+                    "BREAKING due to no posteriors differing... window {}-{}",
+                    window_start, window_end
+                );
                 in_phaseblock = false;
                 while cluster_centers[0][last_attempted_index] == 0.5 {
                     last_attempted_index -= 1;
                 }
-                phase_blocks.push(PhaseBlock{
+                phase_blocks.push(PhaseBlock {
                     start_index: phase_block_start,
                     start_position: vcf_info.variant_positions[phase_block_start],
-                    end_index: last_attempted_index, 
+                    end_index: last_attempted_index,
                     end_position: vcf_info.variant_positions[last_attempted_index],
                 });
-                phase_block_start = last_attempted_index  + 1;
+                phase_block_start = last_attempted_index + 1;
                 window_start = vcf_info.variant_positions[phase_block_start];
                 eprintln!("reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
                 let seed = [data.seed; 32];
                 let mut rng: StdRng = SeedableRng::from_seed(seed);
                 for haplotype in 0..cluster_centers.len() {
-                    cluster_centers[haplotype][phase_block_start] = rng.gen::<f32>().min(0.98).max(0.02);
+                    cluster_centers[haplotype][phase_block_start] =
+                        rng.gen::<f32>().min(0.98).max(0.02);
                 }
-                println!("PHASE BLOCK ENDING {}-{}, {}-{}", phase_block_start, last_attempted_index, 
-                    vcf_info.variant_positions[phase_block_start], vcf_info.variant_positions[last_attempted_index]);
+                println!(
+                    "PHASE BLOCK ENDING {}-{}, {}-{}",
+                    phase_block_start,
+                    last_attempted_index,
+                    vcf_info.variant_positions[phase_block_start],
+                    vcf_info.variant_positions[last_attempted_index]
+                );
                 continue 'outer;
             }
-            cluster_center_delta = maximization(&molecules, posteriors, &mut cluster_centers, &mut min_index, &mut max_index);
+            cluster_center_delta = maximization(
+                &molecules,
+                posteriors,
+                &mut cluster_centers,
+                &mut min_index,
+                &mut max_index,
+            );
             if max_index != 0 {
                 last_attempted_index = max_index;
                 if !in_phaseblock {
@@ -208,57 +226,346 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 }
                 in_phaseblock = true;
             }
-            
-            //for haplotype in 0..cluster_centers.len() {
-            //    print!("haplotype {}\t", haplotype);
-            //    for variant in min_index..max_index {
-             //       print!("var{}:{} | ", variant, cluster_centers[haplotype][variant]);
-            //    }println!();
-            //}
+
             iteration += 1;
         }
-        println!("converged in {} iterations, min {} max {}", iteration, min_index, max_index);
+        println!(
+            "converged in {} iterations, min {} max {}",
+            iteration, min_index, max_index
+        );
         for haplotype in 0..cluster_centers.len() {
             print!("haplotype {}\t", haplotype);
             for variant in min_index..max_index {
-                print!("var{},{}:{} | ", variant, vcf_info.variant_positions[variant], cluster_centers[haplotype][variant]);
-            }println!();
+                print!(
+                    "var{},{}:{} | ",
+                    variant,
+                    vcf_info.variant_positions[variant],
+                    cluster_centers[haplotype][variant]
+                );
+            }
+            println!();
         }
-        window_start += data.phasing_window/4;
+        window_start += data.phasing_window / 4;
         window_start = window_start.min(vcf_info.final_position as usize);
         eprintln!("moving window start to {}", window_start);
-        window_end += data.phasing_window/4;
+        window_end += data.phasing_window / 4;
         window_end = window_end.min(vcf_info.final_position as usize);
         //break;
     }
 
-    phase_blocks.push(PhaseBlock{
+    phase_blocks.push(PhaseBlock {
         start_index: phase_block_start,
         start_position: vcf_info.variant_positions[phase_block_start],
-        end_index: last_attempted_index, 
+        end_index: last_attempted_index,
         end_position: vcf_info.variant_positions[last_attempted_index],
     });
-    
+
     println!("DONE!");
     for (id, phase_block) in phase_blocks.iter().enumerate() {
-        println!("phase block {} from {}-{}, {}-{}", 
-            id, phase_block.start_position, phase_block.end_position, 
-            phase_block.start_index, phase_block.end_index);
+        println!(
+            "phase block {} from {}-{}, {}-{}",
+            id,
+            phase_block.start_position,
+            phase_block.end_position,
+            phase_block.start_index,
+            phase_block.end_index
+        );
     }
+    let new_phase_blocks = phase_phaseblocks(data, &mut cluster_centers, &phase_blocks);
     output_phased_vcf(data, cluster_centers, phase_blocks);
     Ok(())
 }
 
-fn output_phased_vcf(data: &ThreadData, cluster_centers: Vec<Vec<f32>>, phase_blocks: Vec<PhaseBlock>) {
-    let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}",data.vcf_out.to_string()))
+fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, phase_blocks: &Vec<PhaseBlock>) {
+    let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
-    let mut vcf_writer = bcf::Writer::from_path(format!("{}/phased_chrom_{}.bcf", data.output, data.chrom), 
-        &bcf::header::Header::from_template(vcf_reader.header()), 
-        false, Format::Bcf).expect("could not open vcf writer");
+    let chrom = vcf_reader
+        .header()
+        .name2rid(data.chrom.as_bytes())
+        .expect("cant get chrom rid");
+    let vcf_info = inspect_vcf(&mut vcf_reader, &data);
+    let mut phase_block_ids: HashMap<usize,usize> = HashMap::new();
+    for (id, phase_block) in phase_blocks.iter().enumerate() {
+        for i in phase_block.start_index..(phase_block.end_index+1) {
+            phase_block_ids.insert(i,id);
+        }
+    }
+    vcf_reader
+        .fetch(chrom, 0, None)
+        .expect("some actual error");
+    let mut hic_reads = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
+    let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
+    // ok that is a map from (phase_block_id, phase_block_id) to a map from (pb1_hap, pb2_hap) to counts
+    for hic_read in hic_reads {
+        for i in 0..hic_read.len() {
+            for j in (i+1)..hic_read.len() {
+                let allele1 = hic_read[i];
+                let allele2 = hic_read[j];
+                let mut allele1_haps: Vec<u8> = Vec::new();
+                let mut allele2_haps: Vec<u8> = Vec::new();
+                for haplotype in 0..cluster_centers.len() {
+                    if cluster_centers[haplotype][allele1.index] > 0.95  && allele1.allele { //TODO DONT HARD CODE
+                        allele1_haps.push(haplotype as u8);
+                    } else if cluster_centers[haplotype][allele1.index] < 0.05  && !allele1.allele {
+                        allele1_haps.push(haplotype as u8);
+                    }
+                    if cluster_centers[haplotype][allele2.index] > 0.95  && allele2.allele { //TODO DONT HARD CODE
+                        allele2_haps.push(haplotype as u8);
+                    } else if cluster_centers[haplotype][allele2.index] < 0.05  && !allele2.allele {
+                        allele2_haps.push(haplotype as u8);
+                    }
+                }
+                let phase_block1 = phase_block_ids.get(&allele1.index).expect("if you are reading this, i screwed up");
+                let phase_block2 = phase_block_ids.get(&allele2.index).expect("why didnt the previous one fail first?");
+                if phase_block1 != phase_block2 {
+                    let min = phase_block1.min(phase_block2);
+                    let max = phase_block1.max(phase_block2);
+                    let hap_counts = all_counts.entry((*min,*max)).or_insert(HashMap::new());
+                    for pb1_hap in &allele1_haps {
+                        for pb2_hap in &allele2_haps {
+                            let count = hap_counts.entry((*pb1_hap, *pb2_hap)).or_insert(0);
+                            *count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+
+    let mut all_phase_block_alleles: HashMap<usize, HashMap<String, Allele>> = HashMap::new();
+
+    let phase_block1 = 0;
+    let phase_block2 = 1; //TODODODOD go back and make code to reduce to 2
+    let counts = match all_counts.get((phase_block1, phase_block2)) {
+        Some(x) => x,
+        None => HashMap::new();
+    };
+    do_something(&counts);
+
+
+
+}
+
+fn do_something(counts: HashMap<(u8,u8),usize>, ploidy: usize) {
+    let all_possible_pairings = pairings(ploidy); // get all pairings
+    // each pairing implies a multinomial distribution on each pair of alleles
+    
+    if ploidy == 2 { // diploid special case TODO consider making diploid and polyploid generalized?
+        // but maybe the diploid case naturally has more power due to the assumed exclusivity of on allele
+        // on each haplotype
+        let cis1 = counts.get((0,0)).unwrap_or(0);
+        let cis2 = counts.get((1,1)).unwrap_or(0);
+        let trans1 = counts.get((0,1)).unwrap_or(0);
+        let trans2 = counts.get((1,0)).unwrap_or(0);
+        let cis = cis1 + cis2;
+        let trans = trans1 + trans2;
+        let total = cis + trans;
+        let p_value = binomial_test(cis, trans);
+        if p_value < 0.0001 { // TODO DONT HARD CODE
+            if cis > trans {
+                assert!((cis1.min(cis2) as f32) / (cis as f32) > 0.15, 
+                    "something is weird here, minor allele fraction is small in hic phasing");
+            } else {
+                assert!((trans1.min(trans2) as f32) / (trans as f32) > 0.15, 
+                    "something is weird here, minor allele fraction is small in hic phasing");
+            }
+        }
+        // do something
+    } else { // polyploid case
+        // create ordering of preferences of haplotypes in phaseblock2 for haplotypes in phaseblock1
+        let (hap1_preferences, hap2_preferences) = get_marriage_preferences(&counts, ploidy);
+        let mut hap1_rankings: Vec<HashMap<usize, usize>> = Vec::new();
+        let mut hap2_rankings: Vec<HashMap<usize, usize>> = Vec::new();
+        for hap1 in 0..ploidy {
+            let mut rankings: HashMap<usize, usize> = HashMap::new();
+            for (rank, (_, hap2)) in hap1_preferences.iter().enumerate() {
+                rankings.insert(hap2, rank);
+            }
+            hap1_rankings.push(rankings);
+        }
+        for hap2 in 0..ploidy {
+            let mut rankings: HashMap<usize, usize> = HashMap::new();
+            for (rank, (_, hap1)) in hap2_preferences.iter().enumerate() {
+                rankings.insert(hap1, rank);
+            }
+            hap2_rankings.push(rankings);
+        }
+        let mut has_proposed_to: Vec<HashSet<usize>> = Vec::new();
+        for h1 in 0..ploidy { has_proposed_to.push(HashSet::new()); }
+        let mut suitor_engagements: HashMap<usize, usize> = HashMap::new();
+        let mut maiden_engagements: HashSet<usize, usize> = HashMap::new(); //
+        // step 1: In the first round, first a) each unengaged man proposes to the woman he prefers most, 
+        // and then b) each woman replies "maybe" to her suitor she most prefers and "no" to all other 
+        // suitors. She is then provisionally "engaged" to the suitor she most prefers so far, 
+        // and that suitor is likewise provisionally engaged to her.
+        let mut maidens_proposals: Vec<HashSet<usize>> = Vec::new(); 
+        // each haplotype2_maiden could have multiple proposals
+        for hap2_maiden in 0..ploidy { maidens_proposals.push(HashSet::new()); }
+        for haplotype1_suitor in 0..ploidy {
+            for (_, haplotype2_maiden) in hap1_preferences {
+                has_proposed_to[haplotype1_suitor].insert(haplotype2_maiden);
+                maidens_proposals.insert(haplotype1_suitor);
+            }
+        }
+        for haplotype2_maiden in 0..ploidy {
+            for (_, haplotype1_suitor) in hap2_preferences {
+                if maidens_proposals[haplotype2_maiden].contains(haplotype1_suitor) {
+                    suitor_engagements.insert(haplotype1_suitor, haplotype2_maiden);
+                    maiden_engagements.insert(haplotype2_maiden, haplotype1_suitor);
+                    break;
+                }
+            }
+        }
+        // steps 2 and on
+        // In each subsequent round, first a) each unengaged man proposes to the most-preferred woman 
+        // to whom he has not yet proposed (regardless of whether the woman is already engaged), 
+        // and then b) each woman replies "maybe" if she is currently not engaged or if she prefers 
+        // this man over her current provisional partner (in this case, she rejects her current 
+        // provisional partner who becomes unengaged). The provisional nature of engagements preserves 
+        // the right of an already-engaged woman to "trade up" (and, in the process, to "jilt" 
+        // her until-then partner).
+        while current_engagements.len() < ploidy {
+            let mut maidens_proposals: Vec<HashSet<usize>> = Vec::new(); 
+            // each haplotype2_maiden could have multiple proposals
+            for hap2_maiden in 0..ploidy { maidens_proposals.push(HashSet::new()); }
+
+            for haplotype1_suitor in 0..ploidy {
+                if suitor_engagements.contains_key(haplotype1_suitor) { continue; }
+                for (_, haplotype2_maiden) in hap1_preferences {
+                    if has_proposed_to[haplotype1_suitor].contains(haplotype2_maiden) { 
+                        continue; 
+                    } else {
+                        has_proposed_to[haplotype1_suitor].insert(haplotype2_maiden);
+                        maidens_proposals.insert(haplotype1_suitor);
+                    }
+                }
+            }
+
+            for haplotype2_maiden in 0..ploidy {
+                let mut best_proposal: Option<usize> = None;
+                for (_, haplotype1_suitor) in hap2_preferences {
+                    if maidens_proposals[haplotype2_maiden].contains(haplotype1_suitor) {
+                        best_proposal = Some(haplotype1_suitor);
+                        break;
+                    }
+                }
+                match best_proposal {
+                    Some(hap1_suitor) => {
+                        if !maiden_engagements.contains_key(haplotype2_maiden) {
+
+                        } else {
+                            let new_suitor_ranking = hap2_rankings[hap2_maiden].get(hap1_suitor).unwrap_or(usize::MAX);
+                            let former_suitor = maiden_engagements.get(haplotype2_maiden).unwrap();
+                            let former_suitor_ranking = hap2_rankings[hap2_maiden].get(former_suitor).unwrap_or(usize::MAX);
+                            if new_suitor_ranking < former_suitor_ranking {
+                                // jilting former suitor
+                                maiden_engagements.insert(haplotype2_maiden, hap1_suitor);
+                                suitor_engagements.insert(haplotype1_suitor, haplotype2_maiden);
+                                suitor_engagements.remove(former_suitor);
+                            }
+                        },
+                    None => (),
+                }
+            }
+        }
+    }
+}
+
+
+
+fn get_marriage_preferences(counts: &HashMap<(u8,u8),usize>, ploidy: usize) -> 
+    (Vec<Vec<(usize, usize)>>, Vec<Vec<(usize, usize)>>) { 
+    let mut hap1_preferences: Vec<Vec<(usize, usize)>> = Vec::new();// (counts, haplotype2)
+    for haplotype1 in 0..ploidy {
+        let mut preference_counts: Vec<(usize, usize)> = Vec::new(); // (counts, haplotype2)
+        for haplotype2 in 0..ploidy {
+            let count = counts.get(&(haplotype1, haplotype2)).unwrap_or(0);
+            preference_counts.push((count, haplotype2));
+        }
+        preference_counts.sort();
+        preverence_counts.reverse();
+        hap1_prefernces.push(preference_counts);
+    }
+    for haplotype2 in 0..ploidy {
+        let mut preference_counts: Vec<(usize, usize)> = Vec::new(); // (counts, haplotype2)
+        for haplotype1 in 0..ploidy {
+            let count = counts.get(&(haplotype1, haplotype2)).unwrap_or(0);
+            preference_counts.push((count, haplotype2));
+        }
+        preference_counts.sort();
+        preverence_counts.reverse();
+        hap2_prefernces.push(preference_counts);
+    }
+    (hap1_preferences, hap2_preferences)
+}
+
+
+fn pairings(size: usize) -> Vec<Vec<(usize, usize)>> {
+    let pairings_so_far: Vec<(usize, usize)> = Vec::new();
+    let left: Vec<usize> = (0..size).collect();
+    let right: Vec<usize> = (0..size).collect();
+    return generate_pairings(pairings_so_far, left, right);
+}
+
+// generates all bipartite graph pairings
+fn generate_pairings(pairings_so_far: Vec<(usize, usize)>, left_remaining: Vec<usize>, right_remaining: Vec<usize>) -> Vec<Vec<(usize, usize)>> {
+    assert!(left_remaining.len() == right_remaining.len());
+    let mut to_return: Vec<Vec<(usize, usize)>> = Vec::new();
+    if left_remaining.len() == 0 {
+        to_return.push(pairings_so_far);
+        return to_return;
+    }
+    let left = &left_remaining[0];
+    for right in right_remaining.iter() {
+        let mut so_far = pairings_so_far.to_vec();
+        so_far.push((*left, *right));
+        let mut new_left: Vec<usize> = Vec::new();
+        for l in left_remaining.iter() {
+            if l != left {
+                new_left.push(*l);
+            }
+        }
+        let mut new_right: Vec<usize> = Vec::new();
+        for r in right_remaining.iter() {
+            if r != right {
+                new_right.push(*r);
+            }
+        }
+        let new_pairings = generate_pairings(so_far, new_left, new_right);
+        for pairing in new_pairings {
+            to_return.push(pairing);
+        }
+    }
+    return to_return;
+}
+
+fn binomial_test(cis: f32, trans: f32) -> f64 {
+    let min = cis.min(trans) as f64;
+    let n = Binomial::new(0.5, (cis+trans) as u64).unwrap();
+    let p_value = n.cdf(min) * 2.0;
+    p_value
+}
+
+fn output_phased_vcf(
+    data: &ThreadData,
+    cluster_centers: Vec<Vec<f32>>,
+    phase_blocks: Vec<PhaseBlock>,
+) {
+    let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
+        .expect("could not open indexed vcf reader on output vcf");
+    let mut vcf_writer = bcf::Writer::from_path(
+        format!("{}/phased_chrom_{}.bcf", data.output, data.chrom),
+        &bcf::header::Header::from_template(vcf_reader.header()),
+        false,
+        Format::Bcf,
+    )
+    .expect("could not open vcf writer");
     let mut index: usize = 0;
     let mut index_to_phase_block: HashMap<usize, usize> = HashMap::new();
     for (id, phase_block) in phase_blocks.iter().enumerate() {
-        for i in phase_block.start_index..(phase_block.end_index+1) {
+        for i in phase_block.start_index..(phase_block.end_index + 1) {
             index_to_phase_block.insert(i, id);
         }
     }
@@ -267,7 +574,8 @@ fn output_phased_vcf(data: &ThreadData, cluster_centers: Vec<Vec<f32>>, phase_bl
         //println!("{}",index);
         let phase_block_id = index_to_phase_block.get(&index).expect("i had it coming");
         let genotypes = infer_genotype(&cluster_centers, index);
-        rec.push_genotypes(&genotypes).expect("i did expect this error");
+        rec.push_genotypes(&genotypes)
+            .expect("i did expect this error");
         vcf_writer.write(&rec).expect("could not write record");
         index += 1;
     }
@@ -289,9 +597,14 @@ fn infer_genotype(cluster_centers: &Vec<Vec<f32>>, index: usize) -> Vec<Genotype
     genotypes
 }
 
-fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>, 
-    cluster_centers: &mut Vec<Vec<f32>>, min_index: &mut usize, max_index: &mut usize) -> f32 {
-    let mut updates: HashMap<usize, Vec<(f32, f32)>> = HashMap::new(); // variant index to vec across 
+fn maximization(
+    molecules: &Vec<Vec<Allele>>,
+    posteriors: Vec<Vec<f32>>,
+    cluster_centers: &mut Vec<Vec<f32>>,
+    min_index: &mut usize,
+    max_index: &mut usize,
+) -> f32 {
+    let mut updates: HashMap<usize, Vec<(f32, f32)>> = HashMap::new(); // variant index to vec across
     let mut variant_molecule_count: HashMap<usize, usize> = HashMap::new();
     *min_index = std::usize::MAX;
     *max_index = 0;
@@ -300,13 +613,13 @@ fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>,
         // if molecule does not support any haplotype over another, dont use it in maximization
         let mut different = false;
         for haplotype in 0..cluster_centers.len() {
-            if posteriors[molecule_index][haplotype] != posteriors[molecule_index][0] { 
-                different = true; 
+            if posteriors[molecule_index][haplotype] != posteriors[molecule_index][0] {
+                different = true;
             }
         }
         if !different {
             //println!("debug, molecule does not support any haplotype over another");
-            continue; 
+            continue;
         }
         for allele in &molecules[molecule_index] {
             let variant_index = allele.index;
@@ -315,7 +628,9 @@ fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>,
             *count += 1;
             for haplotype in 0..cluster_centers.len() {
                 let posterior = posteriors[molecule_index][haplotype];
-                let numerators_denominators = updates.entry(variant_index).or_insert(vec![(0.0, 0.0); cluster_centers.len()]);
+                let numerators_denominators = updates
+                    .entry(variant_index)
+                    .or_insert(vec![(0.0, 0.0); cluster_centers.len()]);
                 if alt {
                     numerators_denominators[haplotype].0 += posterior;
                     numerators_denominators[haplotype].1 += posterior;
@@ -327,18 +642,20 @@ fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>,
     }
     let mut total_change = 0.0;
     for (variant_index, haplotypes) in updates.iter() {
-        if variant_molecule_count.get(variant_index).unwrap() > &3 { //TODO Dont hard code stuff
+        if variant_molecule_count.get(variant_index).unwrap() > &3 {
+            //TODO Dont hard code stuff
             *min_index = (*min_index).min(*variant_index);
             *max_index = (*max_index).max(*variant_index);
             for haplotype in 0..haplotypes.len() {
                 let numerators_denominators = haplotypes[haplotype];
-                let allele_fraction = (numerators_denominators.0 / numerators_denominators.1).max(0.001).min(0.999);
-                total_change += (allele_fraction - cluster_centers[haplotype][*variant_index]).abs();
+                let allele_fraction = (numerators_denominators.0 / numerators_denominators.1)
+                    .max(0.001)
+                    .min(0.999);
+                total_change +=
+                    (allele_fraction - cluster_centers[haplotype][*variant_index]).abs();
                 cluster_centers[haplotype][*variant_index] = allele_fraction;
-               
             }
-            
-        } 
+        }
     }
     total_change
 }
@@ -346,7 +663,10 @@ fn maximization(molecules: &Vec<Vec<Allele>>, posteriors: Vec<Vec<f32>>,
 // molecules is vec of molecules each a vec of alleles
 // cluster centers is vec of haplotype clusters  by variant loci
 // posteriors (return value) is molecules by clusters to posterior probability
-fn expectation(molecules: &Vec<Vec<Allele>>, cluster_centers: &Vec<Vec<f32>>) -> (bool, Vec<Vec<f32>>) {
+fn expectation(
+    molecules: &Vec<Vec<Allele>>,
+    cluster_centers: &Vec<Vec<f32>>,
+) -> (bool, Vec<Vec<f32>>) {
     let mut posteriors: Vec<Vec<f32>> = Vec::new();
     let mut any_different = false;
     for molecule in molecules.iter() {
@@ -354,8 +674,9 @@ fn expectation(molecules: &Vec<Vec<Allele>>, cluster_centers: &Vec<Vec<f32>>) ->
         for haplotype in 0..cluster_centers.len() {
             let mut log_prob = 0.0; // log(0) = probability 1
             for allele in molecule.iter() {
-                if allele.allele { // alt allele
-                    log_prob += cluster_centers[haplotype][allele.index].ln();// adding in log space, multiplying in probability space
+                if allele.allele {
+                    // alt allele
+                    log_prob += cluster_centers[haplotype][allele.index].ln(); // adding in log space, multiplying in probability space
                 } else {
                     log_prob += (1.0 - cluster_centers[haplotype][allele.index]).ln();
                 }
@@ -368,13 +689,13 @@ fn expectation(molecules: &Vec<Vec<Allele>>, cluster_centers: &Vec<Vec<f32>>) ->
         for log_prob in log_probs {
             mol_posteriors.push((log_prob - bayes_log_denom).exp());
         }
-        
+
         for haplotype in 0..cluster_centers.len() {
-            if mol_posteriors[haplotype] != mol_posteriors[0] { 
-                any_different = true; 
+            if mol_posteriors[haplotype] != mol_posteriors[0] {
+                any_different = true;
             }
         }
-        
+
         posteriors.push(mol_posteriors);
     }
     (!any_different, posteriors)
@@ -386,53 +707,69 @@ fn log_sum_exp(p: &Vec<f32>) -> f32 {
     max_p + sum_rst.ln()
 }
 
-fn get_long_read_molecules(vcf: &mut bcf::IndexedReader,
-        vcf_info: &VCF_info//, 
-        //position_to_index: &mut HashMap<usize, usize>,
-        //position_so_far: &mut usize
-    ) -> Vec<Vec<Allele>> {
+enum READ_TYPE {
+    HIFI, HIC,
+}
+
+fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_type: READ_TYPE) -> Vec<Vec<Allele>> {
     let mut molecules: HashMap<String, Vec<Allele>> = HashMap::new();
+    let ref_tag;
+    let alt_tag;
+    match read_type {
+        READ_TYPE::HIFI => {
+            ref_tag = b"RM"; 
+            alt_tag = b"AM";
+        },
+        READ_TYPE::HIC => {
+            ref_tag = b"RH";
+            alt_tag = b"AH";
+        }
+    }
 
     for rec in vcf.records() {
         let rec = rec.expect("couldnt unwrap record");
         let pos = rec.pos();
-        let var_index = vcf_info.position_to_index.get(&(pos as usize)).expect("please don't do this to me");
-        //let mut update = true;
-        //if position_to_index.contains_key(&(pos as usize)) {
-        //    update = false;
-        //}
-        //let var_index = position_to_index.entry(pos as usize).or_insert(*position_so_far);
-        //if update {
-        //    *position_so_far += 1; 
-        //}
-        match rec.format(b"RM").string() {
+        let var_index = vcf_info
+            .position_to_index
+            .get(&(pos as usize))
+            .expect("please don't do this to me");
+
+        match rec.format(ref_tag).string() { 
             Ok(rec_format) => {
                 for rec in rec_format.iter() {
                     let ref_mols = std::str::from_utf8(rec).expect(":").to_string();
                     for read in ref_mols.split(";") {
                         let mol = molecules.entry(read.to_string()).or_insert(Vec::new());
-                        mol.push(Allele{index: *var_index, allele: false});
+                        mol.push(Allele {
+                            index: *var_index,
+                            allele: false,
+                        });
                     }
                 }
-            },
+            }
             Err(_) => println!("fail"),
         }
-        match rec.format(b"AM").string() {
+        match rec.format(alt_tag).string() {
             Ok(rec_format) => {
                 for rec in rec_format.iter() {
                     let alt_mols = std::str::from_utf8(rec).expect(":").to_string();
                     for read in alt_mols.split(";") {
                         let mol = molecules.entry(read.to_string()).or_insert(Vec::new());
-                        mol.push(Allele{index: *var_index, allele: true});
+                        mol.push(Allele {
+                            index: *var_index,
+                            allele: true,
+                        });
                     }
                 }
-            },
+            }
             Err(_) => println!("fail"),
         }
     }
     let mut to_return: Vec<Vec<Allele>> = Vec::new();
     for (_read_name, alleles) in molecules.iter() {
-        if alleles.len() < 2 { continue; }
+        if alleles.len() < 2 {
+            continue;
+        }
         let mut mol: Vec<Allele> = Vec::new();
         for allele in alleles {
             mol.push(*allele);
@@ -442,9 +779,9 @@ fn get_long_read_molecules(vcf: &mut bcf::IndexedReader,
     to_return
 }
 
-#[derive(Clone,Copy)]
+#[derive(Clone, Copy)]
 struct Allele {
-    index:  usize,
+    index: usize,
     allele: bool, // alt is true, ref is false
 }
 
@@ -456,7 +793,10 @@ struct VCF_info {
 }
 
 fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
-    let chrom = vcf.header().name2rid(data.chrom.as_bytes()).expect("cant get chrom rid");
+    let chrom = vcf
+        .header()
+        .name2rid(data.chrom.as_bytes())
+        .expect("cant get chrom rid");
     vcf.fetch(chrom, 0, None).expect("could not fetch in vcf");
     let mut position_to_index: HashMap<usize, usize> = HashMap::new();
     let mut num = 0;
@@ -470,9 +810,9 @@ fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
         num += 1;
     }
     println!("vcf has {} variants for chrom {}", num, chrom);
-    VCF_info{
-        num_variants: num, 
-        final_position: last_pos, 
+    VCF_info {
+        num_variants: num,
+        final_position: last_pos,
         variant_positions: variant_positions,
         position_to_index: position_to_index,
     }
@@ -493,13 +833,8 @@ fn init_cluster_centers(num: usize, data: &ThreadData) -> Vec<Vec<f32>> {
     cluster_centers
 }
 
-
 fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
     let mut long_read_bam_reader = match &data.long_read_bam {
-        Some(x) => Some(bam::IndexedReader::from_path(x)?),
-        None => None,
-    };
-    let mut linked_read_bam_reader = match &data.linked_read_bam {
         Some(x) => Some(bam::IndexedReader::from_path(x)?),
         None => None,
     };
@@ -509,84 +844,75 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
     };
     let mut fasta = fasta::IndexedReader::from_file(&data.fasta).expect("cannot open fasta file");
 
-    let mut molecule_alleles: MoleculeAlleleWrapper = MoleculeAlleleWrapper{
-        long_read_assignments: match &data.long_read_bam {
-            Some(_x) => Some(HashMap::new()),
-            None => None,
-        },
-        linked_read_assignments: match &data.linked_read_bam {
-            Some(_x) => Some(HashMap::new()),
-            None => None,
-        },
-        
-        hic_read_assignments: match &data.hic_bam {
-            Some(_x) => Some(HashMap::new()),
-            None => None,
-        },
-    };
     let mut vcf_reader = bcf::IndexedReader::from_path(data.vcf.to_string())?;
-    let header_view =  vcf_reader.header();
+    let header_view = vcf_reader.header();
     let mut new_header = bcf::header::Header::from_template(header_view);
     new_header.push_record(br#"##fileformat=VCFv4.2"#);
-    new_header.push_record(br#"##FORMAT=<ID=AM,Number=1,Type=String,Description="alt molecules">"#);
-    new_header.push_record(br#"##FORMAT=<ID=RM,Number=1,Type=String,Description="ref molecules">"#);
+    new_header.push_record(br#"##FORMAT=<ID=AM,Number=1,Type=String,Description="alt molecules long reads">"#);
+    new_header.push_record(br#"##FORMAT=<ID=RM,Number=1,Type=String,Description="ref molecules long reads">"#);
+    new_header.push_record(br#"##FORMAT=<ID=AH,Number=1,Type=String,Description="alt molecules hic">"#);
+    new_header.push_record(br#"##FORMAT=<ID=RH,Number=1,Type=String,Description="ref molecules hic">"#);
 
-    { // creating my own scope to close later to close vcf writer
-    let mut vcf_writer = bcf::Writer::from_path(data.vcf_out.to_string(), 
-        &new_header, false, Format::Bcf)?;
-    let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
-    vcf_reader.fetch(chrom, 0, None)?;  // skip to chromosome for this thread
-    let mut total = 0;
-    let mut hets = 0;
-    for (i, _rec) in vcf_reader.records().enumerate() {
-        total += 1;
-        let rec = _rec?;
-        let pos = rec.pos();
-        let alleles = rec.alleles();
-        let mut new_rec = vcf_writer.empty_record();
-        copy_vcf_record(&mut new_rec, &rec);
-        if alleles.len() > 2 {
-            continue; // ignore multi allelic sites
+    {
+        // creating my own scope to close later to close vcf writer
+        let mut vcf_writer =
+            bcf::Writer::from_path(data.vcf_out.to_string(), &new_header, false, Format::Bcf)?;
+        let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
+        vcf_reader.fetch(chrom, 0, None)?; // skip to chromosome for this thread
+        let mut total = 0;
+        let mut hets = 0;
+        for (i, _rec) in vcf_reader.records().enumerate() {
+            total += 1;
+            let rec = _rec?;
+            let pos = rec.pos();
+            let alleles = rec.alleles();
+            let mut new_rec = vcf_writer.empty_record();
+            copy_vcf_record(&mut new_rec, &rec);
+            if alleles.len() > 2 {
+                continue; // ignore multi allelic sites
+            }
+            let reference = std::str::from_utf8(alleles[0])?;
+            let alternative = std::str::from_utf8(alleles[1])?;
+            let rec_chrom = rec.rid().expect("could not unwrap vcf record id");
+
+            let genotypes = rec.genotypes()?;
+            let genotype = genotypes.get(0); // assume only 1 and get the first one
+            if is_heterozygous(genotype) {
+                hets += 1;
+                get_variant_assignments(
+                    &data.chrom,
+                    pos as usize,
+                    reference.to_string(),
+                    alternative.to_string(),
+                    data.min_mapq,
+                    data.min_base_qual,
+                    &mut long_read_bam_reader,
+                    &mut hic_bam_reader,
+                    &mut fasta,
+                    data.window,
+                    data.chrom_length,
+                    &mut vcf_writer,
+                    &mut new_rec,
+                );
+            }
+            if hets > 2000 {
+                break;
+            } //TODO remove, for small example
         }
-        let reference = std::str::from_utf8(alleles[0])?;
-        let alternative = std::str::from_utf8(alleles[1])?;
-        let rec_chrom = rec.rid().expect("could not unwrap vcf record id");
-
-        let genotypes = rec.genotypes()?;
-        let genotype = genotypes.get(0); // assume only 1 and get the first one
-        if is_heterozygous(genotype) {
-            hets += 1;
-            get_variant_assignments(
-                &data.chrom,
-                pos as usize,
-                reference.to_string(),
-                alternative.to_string(),
-                data.min_mapq,
-                data.min_base_qual,
-                &mut long_read_bam_reader,
-                &mut linked_read_bam_reader,
-                &mut hic_bam_reader,
-                &mut fasta,
-                data.window,
-                data.chrom_length,
-                &mut molecule_alleles,
-                &mut vcf_writer,
-                &mut new_rec
-            );
-        }
-        if hets > 2000 { break; } //TODO remove, for small example
-    }
-    println!("done, saw {} records of which {} were hets in chrom {}", total, hets, data.chrom);
-
+        println!(
+            "done, saw {} records of which {} were hets in chrom {}",
+            total, hets, data.chrom
+        );
     } //creating my own scope to close vcf
 
-    let result = Command::new("bcftools").args(&["index","-f", &data.vcf_out]).status().expect("bcftools failed us");
+    let result = Command::new("bcftools")
+        .args(&["index", "-f", &data.vcf_out])
+        .status()
+        .expect("bcftools failed us");
 
     fs::File::create(data.vcf_out_done.to_string())?;
     Ok(())
 }
-
-
 
 fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record) {
     new_rec.set_rid(rec.rid());
@@ -595,15 +921,20 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
     for filter in rec.filters() {
         new_rec.push_filter(&filter);
     }
-    new_rec.set_alleles(&rec.alleles()).expect("could not write alleles to new record???");
+    new_rec
+        .set_alleles(&rec.alleles())
+        .expect("could not write alleles to new record???");
     new_rec.set_qual(rec.qual());
     let header = rec.header();
     for header_record in header.header_records() {
         match header_record {
-            bcf::header::HeaderRecord::Filter{key, values} => {},
-            bcf::header::HeaderRecord::Info{key, values} => {
-                let mut format = FORMAT{Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
-                for (x,y) in values {
+            bcf::header::HeaderRecord::Filter { key, values } => {}
+            bcf::header::HeaderRecord::Info { key, values } => {
+                let mut format = FORMAT {
+                    Id: "blah".to_string(),
+                    Type: FORMAT_TYPE::Integer,
+                };
+                for (x, y) in values {
                     match x.as_str() {
                         "ID" => format.Id = y,
                         "Type" => match y.as_str() {
@@ -617,47 +948,56 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                     }
                 }
                 match format.Type {
-                    FORMAT_TYPE::Integer => {
-                        match rec.info(&format.Id.as_bytes()).integer() {
-                            Ok(rec_format) => {
-                                for thingy in rec_format.iter() {
-                                    new_rec.push_info_integer(&format.Id.as_bytes(), thingy).expect("fail1");
-                                }
-                            },
-                            Err(_) => (),
+                    FORMAT_TYPE::Integer => match rec.info(&format.Id.as_bytes()).integer() {
+                        Ok(rec_format) => {
+                            for thingy in rec_format.iter() {
+                                new_rec
+                                    .push_info_integer(&format.Id.as_bytes(), thingy)
+                                    .expect("fail1");
+                            }
                         }
+                        Err(_) => (),
                     },
-                    FORMAT_TYPE::Float => {
-                        match rec.info(&format.Id.as_bytes()).float() {
-                            Ok(rec_format) => {
-                                for thingy in rec_format.iter() {
-                                    new_rec.push_info_float(&format.Id.as_bytes(), thingy).expect("fail1");
-                                }
-                            },
-                            Err(_) => (),
+                    FORMAT_TYPE::Float => match rec.info(&format.Id.as_bytes()).float() {
+                        Ok(rec_format) => {
+                            for thingy in rec_format.iter() {
+                                new_rec
+                                    .push_info_float(&format.Id.as_bytes(), thingy)
+                                    .expect("fail1");
+                            }
                         }
+                        Err(_) => (),
                     },
-                    FORMAT_TYPE::String => {
-                        match rec.info(&format.Id.as_bytes()).string() {
-                            Ok(rec_format) => {
-                                new_rec.push_info_string(&format.Id.as_bytes(), &rec_format.expect("blerg")).expect("fail1");
-                            },
-                            Err(_) => (),
+                    FORMAT_TYPE::String => match rec.info(&format.Id.as_bytes()).string() {
+                        Ok(rec_format) => {
+                            new_rec
+                                .push_info_string(
+                                    &format.Id.as_bytes(),
+                                    &rec_format.expect("blerg"),
+                                )
+                                .expect("fail1");
                         }
+                        Err(_) => (),
                     },
-                    FORMAT_TYPE::Char => {
-                        match rec.info(&format.Id.as_bytes()).string() {
-                            Ok(rec_format) => {
-                                new_rec.push_info_string(&format.Id.as_bytes(), &rec_format.expect("blerg2")).expect("fail1");
-                            },
-                            Err(_) => (),
+                    FORMAT_TYPE::Char => match rec.info(&format.Id.as_bytes()).string() {
+                        Ok(rec_format) => {
+                            new_rec
+                                .push_info_string(
+                                    &format.Id.as_bytes(),
+                                    &rec_format.expect("blerg2"),
+                                )
+                                .expect("fail1");
                         }
+                        Err(_) => (),
                     },
                 }
-            },
-            bcf::header::HeaderRecord::Format{key, values} => {
-                let mut format = FORMAT {Id: "blah".to_string(), Type: FORMAT_TYPE::Integer};
-                for (x,y) in values {
+            }
+            bcf::header::HeaderRecord::Format { key, values } => {
+                let mut format = FORMAT {
+                    Id: "blah".to_string(),
+                    Type: FORMAT_TYPE::Integer,
+                };
+                for (x, y) in values {
                     match x.as_str() {
                         "ID" => format.Id = y,
                         "Type" => match y.as_str() {
@@ -671,25 +1011,25 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                     }
                 }
                 match format.Type {
-                    FORMAT_TYPE::Integer => {
-                        match rec.format(&format.Id.as_bytes()).integer() {
-                            Ok(rec_format) => {
-                                for thingy in rec_format.iter() {
-                                    new_rec.push_format_integer(&format.Id.as_bytes(), thingy).expect("noooooooooo");
-                                }
-                            },
-                            Err(_) => (),
+                    FORMAT_TYPE::Integer => match rec.format(&format.Id.as_bytes()).integer() {
+                        Ok(rec_format) => {
+                            for thingy in rec_format.iter() {
+                                new_rec
+                                    .push_format_integer(&format.Id.as_bytes(), thingy)
+                                    .expect("noooooooooo");
+                            }
                         }
+                        Err(_) => (),
                     },
-                    FORMAT_TYPE::Float => {
-                        match rec.format(&format.Id.as_bytes()).float() {
-                            Ok(rec_format) => {
-                                for thingy in rec_format.iter() {
-                                    new_rec.push_format_float(&format.Id.as_bytes(), thingy).expect("fail1");
-                                }
-                            },
-                            Err(_) => (),
+                    FORMAT_TYPE::Float => match rec.format(&format.Id.as_bytes()).float() {
+                        Ok(rec_format) => {
+                            for thingy in rec_format.iter() {
+                                new_rec
+                                    .push_format_float(&format.Id.as_bytes(), thingy)
+                                    .expect("fail1");
+                            }
                         }
+                        Err(_) => (),
                     },
                     FORMAT_TYPE::String => {
                         if format.Id == "GT".to_string() {
@@ -698,30 +1038,30 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                                 let gt = rec.genotypes().expect("lkjlkj").get(i as usize);
                                 new_rec.push_genotypes(&gt);
                             }
-                            
                         } else {
                             match rec.format(&format.Id.as_bytes()).string() {
                                 Ok(rec_format) => {
-                                    new_rec.push_format_string(&format.Id.as_bytes(), &rec_format).expect("fail1");
-                                },
+                                    new_rec
+                                        .push_format_string(&format.Id.as_bytes(), &rec_format)
+                                        .expect("fail1");
+                                }
                                 Err(_) => (),
                             }
                         }
-                        
-                    },
-                    FORMAT_TYPE::Char => {
-                        match rec.format(&format.Id.as_bytes()).string() {
-                            Ok(rec_format) => {
-                                new_rec.push_format_string(&format.Id.as_bytes(), &rec_format).expect("fail1");
-                            },
-                            Err(_) => (),
+                    }
+                    FORMAT_TYPE::Char => match rec.format(&format.Id.as_bytes()).string() {
+                        Ok(rec_format) => {
+                            new_rec
+                                .push_format_string(&format.Id.as_bytes(), &rec_format)
+                                .expect("fail1");
                         }
+                        Err(_) => (),
                     },
                 }
-            },
-            bcf::header::HeaderRecord::Contig{key, values} => {},
-            bcf::header::HeaderRecord::Structured{key, values} => {},
-            bcf::header::HeaderRecord::Generic{key, value} => {},
+            }
+            bcf::header::HeaderRecord::Contig { key, values } => {}
+            bcf::header::HeaderRecord::Structured { key, values } => {}
+            bcf::header::HeaderRecord::Generic { key, value } => {}
         }
     }
 }
@@ -733,12 +1073,13 @@ struct FORMAT {
 
 #[derive(Debug)]
 enum FORMAT_TYPE {
-    Integer, Float, String, Char
+    Integer,
+    Float,
+    String,
+    Char,
 }
 
-
-
-fn get_variant_assignments<'a> (
+fn get_variant_assignments<'a>(
     chrom: &String,
     pos: usize,
     ref_allele: String,
@@ -746,103 +1087,139 @@ fn get_variant_assignments<'a> (
     min_mapq: u8,
     min_base_qual: u8,
     long_reads: &mut Option<bam::IndexedReader>,
-    linked_reads: &mut Option<bam::IndexedReader>,
     hic_reads: &mut Option<bam::IndexedReader>,
     fasta: &mut fasta::IndexedReader<std::fs::File>,
     window: usize,
     chrom_length: u64,
-    molecule_alleles: &mut MoleculeAlleleWrapper,
     vcf_writer: &mut bcf::Writer,
     vcf_record: &mut bcf::record::Record,
-
 ) {
     if (pos + window) as u64 > chrom_length {
         return;
     }
     match long_reads {
         Some(bam) => {
-            let tid = bam.header().tid(chrom.as_bytes()).expect("cannot find chrom tid");
-            bam.fetch((tid, pos as u32, (pos + 1) as u32)).expect("blah"); // skip to region of bam of this variant position
-            let ref_start = (pos - window) as u64;
-            let ref_end = (pos + window + ref_allele.len()) as u64;
-            fasta.fetch(chrom, ref_start, ref_end).expect("fasta fetch failed");
-            let mut ref_sequence: Vec<u8> = Vec::new();
-            fasta.read(&mut ref_sequence).expect("failed to read fasta sequence");
-            //if pos == 69505 { println!("yes, this one"); }
-            let mut alt_sequence: Vec<u8> = Vec::new();
-            for i in 0..window as usize {
-                alt_sequence.push(ref_sequence[i]);
-            }
-            for base in alt_allele.as_bytes() {
-                alt_sequence.push(*base);
-            }
-            for i in (window as usize+ref_allele.len())..ref_sequence.len() {
-                alt_sequence.push(ref_sequence[i]);
-            }
-            
-            
-            let mut read_names_ref: Vec<String> = Vec::new();
-            let mut read_names_alt: Vec<String> = Vec::new();
-            for _rec in bam.records() {
-                let rec = _rec.expect("cannot read bam record");
-                //if pos == 69505 {println!("testing molecule");}
-                if rec.mapq() < min_mapq {
-                    continue
-                }
-                if rec.is_secondary() || rec.is_supplementary() {
-                    continue;
-                }
-                let mut read_start: Option<usize> = None; // I am lazy and for some reason dont know how to do things, so this is my bad solution
-                let mut read_end: usize = rec.seq_len();
-                let mut min_bq = 93;
-                let qual = rec.qual();
-                //println!("ref_start {} ref_end {}", ref_start, ref_end);
-                for pos_pair in rec.aligned_pairs() {
-                    //println!("\t{},{}",pos_pair[0],pos_pair[1]);
-                    if (pos_pair[1] as u64) >= ref_start && (pos_pair[1] as u64) < ref_end {
-                        if pos_pair[1] as usize >= pos && pos_pair[1] as usize <= pos + ref_allele.len().max(alt_allele.len()) {
-                            min_bq = min_bq.min(qual[pos_pair[0] as usize]);
-                        }
-                        read_end = pos_pair[0] as usize;
-                        if read_start == None {
-                            read_start = Some(pos_pair[0] as usize); // assign this value only the first time in this loop that outter if statement is true
-                            // getting the position in the read that corresponds to the reference region of pos-window
-                        }
-                    } 
-                }
-                
-                if min_bq < min_base_qual {
-                    continue;
-                }
-                if read_start == None {
-                    println!("what happened, read start {:?} read end {}", read_start, read_end);
-                    continue;
-                }
-                let read_start = read_start.expect("why read start is none");
-                let seq = rec.seq().as_bytes()[read_start..read_end].to_vec();
-                let score = |a: u8, b: u8| if a == b { MATCH } else { MISMATCH };
-                let mut aligner = banded::Aligner::new(GAP_OPEN, GAP_EXTEND, score, K, W);
-                let ref_alignment = aligner.local(&seq, &ref_sequence);
-                let alt_alignment = aligner.local(&seq, &alt_sequence);
-                if ref_alignment.score > alt_alignment.score {
-                    read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtff").to_string());
-                } else if alt_alignment.score > ref_alignment.score {
-                    read_names_alt.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
-                } 
-                //if pos == 69505 { println!("scores {} and {}",ref_alignment.score, alt_alignment.score);
-                //println!("read_names_ref {}, read_names_alt {}", read_names_ref.len(), read_names_alt.len()); }
-            }
-            
-            let concat_ref = read_names_ref.join(";");
-            let concat_alt = read_names_alt.join(";");
-            //if pos == 69505 { println!("{} {}", concat_ref, concat_alt); }
-            vcf_record.push_format_string(b"AM", &[concat_alt.as_bytes()]).expect("blarg");
-            vcf_record.push_format_string(b"RM", &[concat_ref.as_bytes()]).expect("gggg");
-            vcf_writer.write(vcf_record).expect("nope");
+            let (ref_string, alt_string) = get_read_assignments(chrom.to_string(), pos, bam, 
+                fasta, &ref_allele, &alt_allele, min_base_qual, min_mapq, window);
+            vcf_record
+                .push_format_string(b"AM", &[alt_string.as_bytes()])
+                .expect("blarg");
+            vcf_record
+                .push_format_string(b"RM", &[ref_string.as_bytes()])
+                .expect("gggg");
         }
         None => (),
     }
+    match hic_reads {
+        Some(bam) => {
+            let (ref_string, alt_string) = get_read_assignments(chrom.to_string(), pos, bam, 
+                fasta, &ref_allele, &alt_allele, min_base_qual, min_mapq, window);
+            vcf_record
+                .push_format_string(b"AH", &[alt_string.as_bytes()])
+                .expect("blarg2");
+            vcf_record
+                .push_format_string(b"RH", &[ref_string.as_bytes()])
+                .expect("gggg2");
+        }
+        None => (),
+    }
+    vcf_writer.write(vcf_record).expect("nope");
+}
 
+fn get_read_assignments(
+    chrom: String,
+    pos: usize,
+    bam: &mut bam::IndexedReader,
+    fasta: &mut fasta::IndexedReader<std::fs::File>,
+    ref_allele: &String,
+    alt_allele: &String,
+    min_base_qual: u8,
+    min_mapq: u8,
+    window: usize,
+) -> (String, String) {
+    let tid = bam
+        .header()
+        .tid(chrom.as_bytes())
+        .expect("cannot find chrom tid");
+    bam.fetch((tid, pos as u32, (pos + 1) as u32))
+        .expect("blah"); // skip to region of bam of this variant position
+    let ref_start = (pos - window) as u64;
+    let ref_end = (pos + window + ref_allele.len()) as u64;
+    fasta
+        .fetch(&chrom, ref_start, ref_end)
+        .expect("fasta fetch failed");
+    let mut ref_sequence: Vec<u8> = Vec::new();
+    fasta
+        .read(&mut ref_sequence)
+        .expect("failed to read fasta sequence");
+    //if pos == 69505 { println!("yes, this one"); }
+    let mut alt_sequence: Vec<u8> = Vec::new();
+    for i in 0..window as usize {
+        alt_sequence.push(ref_sequence[i]);
+    }
+    for base in alt_allele.as_bytes() {
+        alt_sequence.push(*base);
+    }
+    for i in (window as usize + ref_allele.len())..ref_sequence.len() {
+        alt_sequence.push(ref_sequence[i]);
+    }
+    let mut read_names_ref: Vec<String> = Vec::new();
+    let mut read_names_alt: Vec<String> = Vec::new();
+    for _rec in bam.records() {
+        let rec = _rec.expect("cannot read bam record");
+        if rec.mapq() < min_mapq {
+            continue;
+        }
+        if rec.is_secondary() || rec.is_supplementary() {
+            continue;
+        }
+        let mut read_start: Option<usize> = None; // I am lazy and for some reason dont know how to do things, so this is my bad solution
+        let mut read_end: usize = rec.seq_len();
+        let mut min_bq = 93;
+        let qual = rec.qual();
+        for pos_pair in rec.aligned_pairs() {
+            if (pos_pair[1] as u64) >= ref_start && (pos_pair[1] as u64) < ref_end {
+                if pos_pair[1] as usize >= pos
+                    && pos_pair[1] as usize <= pos + ref_allele.len().max(alt_allele.len())
+                {
+                    min_bq = min_bq.min(qual[pos_pair[0] as usize]);
+                }
+                read_end = pos_pair[0] as usize;
+                if read_start == None {
+                    read_start = Some(pos_pair[0] as usize); // assign this value only the first time in this loop that outter if statement is true
+                                                             // getting the position in the read that corresponds to the reference region of pos-window
+                }
+            }
+        }
+
+        if min_bq < min_base_qual {
+            continue;
+        }
+        if read_start == None {
+            println!(
+                "what happened, read start {:?} read end {}",
+                read_start, read_end
+            );
+            continue;
+        }
+        let read_start = read_start.expect("why read start is none");
+        let seq = rec.seq().as_bytes()[read_start..read_end].to_vec();
+        let score = |a: u8, b: u8| if a == b { MATCH } else { MISMATCH };
+        let mut aligner = banded::Aligner::new(GAP_OPEN, GAP_EXTEND, score, K, W);
+        let ref_alignment = aligner.local(&seq, &ref_sequence);
+        let alt_alignment = aligner.local(&seq, &alt_sequence);
+        if ref_alignment.score > alt_alignment.score {
+            read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtff").to_string());
+        } else if alt_alignment.score > ref_alignment.score {
+            read_names_alt.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
+        }
+        //if pos == 69505 { println!("scores {} and {}",ref_alignment.score, alt_alignment.score);
+        //println!("read_names_ref {}, read_names_alt {}", read_names_ref.len(), read_names_alt.len()); }
+    }
+
+    let concat_ref = read_names_ref.join(";");
+    let concat_alt = read_names_alt.join(";");
+    (concat_ref, concat_alt)
 }
 
 fn is_heterozygous(gt: bcf::record::Genotype) -> bool {
@@ -866,29 +1243,9 @@ fn is_heterozygous(gt: bcf::record::Genotype) -> bool {
     return false;
 }
 
-
-
-struct MoleculeAlleleWrapper {
-    long_read_assignments: Option<HashMap<String, Vec<Allele>>>,
-    linked_read_assignments: Option<HashMap<String, Vec<Allele>>>,
-    hic_read_assignments: Option<HashMap<String, Vec<Allele>>>,
-}
-
-
-
-
-struct MoleculeAllelesWrapper {
-    hic_alleles: Option<Vec<MoleculeAlleles>>,
-    long_read_alleles: Option<Vec<MoleculeAlleles>>,
-    linked_read_alleles: Option<Vec<MoleculeAlleles>>,
-}
-
-struct MoleculeAlleles {}
-
 struct ThreadData {
     index: usize,
     long_read_bam: Option<String>,
-    linked_read_bam: Option<String>,
     hic_bam: Option<String>,
     fasta: String,
     chrom: String,
@@ -907,7 +1264,6 @@ struct ThreadData {
 
 #[derive(Clone)]
 struct Params {
-    linked_read_bam: Option<String>,
     hic_bam: Option<String>,
     long_read_bam: Option<String>,
     output: String,
@@ -927,10 +1283,6 @@ fn load_params() -> Params {
     let params = App::from_yaml(yaml).get_matches();
 
     let output = params.value_of("output").unwrap();
-    let linked_read_bam = match params.value_of("linked_read_bam") {
-        Some(x) => Some(x.to_string()),
-        None => None,
-    };
     let hic_bam = match params.value_of("hic_bam") {
         Some(x) => Some(x.to_string()),
         None => None,
@@ -943,12 +1295,12 @@ fn load_params() -> Params {
     let threads = params.value_of("threads").unwrap();
     let threads = threads.to_string().parse::<usize>().unwrap();
 
-    let seed = params.value_of("seed").unwrap(); 
+    let seed = params.value_of("seed").unwrap();
     let seed = seed.to_string().parse::<u8>().unwrap();
 
     let min_mapq = params.value_of("min_mapq").unwrap();
     let min_mapq = min_mapq.to_string().parse::<u8>().unwrap();
-    
+
     let min_base_qual = params.value_of("min_base_qual").unwrap();
     let min_base_qual = min_base_qual.to_string().parse::<u8>().unwrap();
 
@@ -956,19 +1308,21 @@ fn load_params() -> Params {
 
     let ploidy = params.value_of("ploidy").unwrap();
     let ploidy = ploidy.to_string().parse::<usize>().unwrap();
+    assert(ploidy != 1, "what are you doing trying to phase a haploid genome, ploidy cant be 1 here");
 
     let allele_alignment_window = params.value_of("allele_alignment_window").unwrap();
-    let allele_alignment_window = allele_alignment_window.to_string().parse::<usize>().unwrap();
+    let allele_alignment_window = allele_alignment_window
+        .to_string()
+        .parse::<usize>()
+        .unwrap();
 
     let phasing_window = params.value_of("phasing_window").unwrap();
     let phasing_window = phasing_window.to_string().parse::<usize>().unwrap();
-
 
     let vcf = params.value_of("vcf").unwrap();
 
     Params {
         output: output.to_string(),
-        linked_read_bam: linked_read_bam,
         long_read_bam: long_read_bam,
         hic_bam: hic_bam,
         threads: threads,
