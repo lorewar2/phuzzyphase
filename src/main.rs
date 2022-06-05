@@ -30,6 +30,7 @@ use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
+use crate::statrs::distribution::DiscreteCDF;
 
 use hashbrown::{HashMap, HashSet};
 
@@ -293,14 +294,38 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     vcf_reader
         .fetch(chrom, 0, None)
         .expect("some actual error");
-    let mut hic_reads = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
+    let hic_reads = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
     let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
+    let mut allele_pair_counts: HashMap<(usize, usize), [u8; 4]> = HashMap::new();
     // ok that is a map from (phase_block_id, phase_block_id) to a map from (pb1_hap, pb2_hap) to counts
     for hic_read in hic_reads {
         for i in 0..hic_read.len() {
             for j in (i+1)..hic_read.len() {
                 let allele1 = hic_read[i];
                 let allele2 = hic_read[j];
+                if allele1.index < allele2.index {
+                    let counts = allele_pair_counts.entry((allele1.index, allele2.index)).or_insert([0;4]);
+                    if allele1.allele && allele2.allele { // alt and alt
+                        counts[0] += 1;
+                    } else if allele1.allele && !allele2.allele { // alt and ref
+                        counts[1] += 1;
+                    } else if !allele1.allele && allele2.allele { // ref and alt
+                        counts[2] += 1;
+                    } else { // ref and ref
+                        counts[3] += 1;
+                    }
+                } else {
+                    let counts = allele_pair_counts.entry((allele2.index, allele1.index)).or_insert([0;4]);
+                    if allele2.allele && allele1.allele { // alt and alt
+                        counts[0] += 1;
+                    } else if allele2.allele && !allele1.allele { // alt and ref
+                        counts[1] += 1;
+                    } else if !allele2.allele && allele1.allele { // ref and alt
+                        counts[2] += 1;
+                    } else { // ref and ref
+                        counts[3] += 1;
+                    }
+                }
                 let mut allele1_haps: Vec<u8> = Vec::new();
                 let mut allele2_haps: Vec<u8> = Vec::new();
                 for haplotype in 0..cluster_centers.len() {
@@ -338,82 +363,84 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
 
     let phase_block1 = 0;
     let phase_block2 = 1; //TODODODOD go back and make code to reduce to 2
-    let counts = match all_counts.get((phase_block1, phase_block2)) {
+    let empty: HashMap<(u8, u8), usize> = HashMap::new();
+    let counts = match all_counts.get(&(phase_block1, phase_block2)) {
         Some(x) => x,
-        None => HashMap::new();
+        None => &empty,
     };
-    do_something(&counts);
+    do_something(&counts, data.ploidy);
 
 
 
 }
 
-fn do_something(counts: HashMap<(u8,u8),usize>, ploidy: usize) {
+fn do_something(counts: &HashMap<(u8,u8),usize>, ploidy: usize) {
     let all_possible_pairings = pairings(ploidy); // get all pairings
     // each pairing implies a multinomial distribution on each pair of alleles
     
     if ploidy == 2 { // diploid special case TODO consider making diploid and polyploid generalized?
         // but maybe the diploid case naturally has more power due to the assumed exclusivity of on allele
         // on each haplotype
-        let cis1 = counts.get((0,0)).unwrap_or(0);
-        let cis2 = counts.get((1,1)).unwrap_or(0);
-        let trans1 = counts.get((0,1)).unwrap_or(0);
-        let trans2 = counts.get((1,0)).unwrap_or(0);
+        let cis1 = counts.get(&(0,0)).unwrap_or(&0);
+        let cis2 = counts.get(&(1,1)).unwrap_or(&0);
+        let trans1 = counts.get(&(0,1)).unwrap_or(&0);
+        let trans2 = counts.get(&(1,0)).unwrap_or(&0);
         let cis = cis1 + cis2;
         let trans = trans1 + trans2;
-        let total = cis + trans;
         let p_value = binomial_test(cis, trans);
         if p_value < 0.0001 { // TODO DONT HARD CODE
             if cis > trans {
-                assert!((cis1.min(cis2) as f32) / (cis as f32) > 0.15, 
+                assert!((*cis1.min(cis2) as f32) / (cis as f32) > 0.15, 
                     "something is weird here, minor allele fraction is small in hic phasing");
             } else {
-                assert!((trans1.min(trans2) as f32) / (trans as f32) > 0.15, 
+                assert!((*trans1.min(trans2) as f32) / (trans as f32) > 0.15, 
                     "something is weird here, minor allele fraction is small in hic phasing");
             }
         }
         // do something
     } else { // polyploid case
         // create ordering of preferences of haplotypes in phaseblock2 for haplotypes in phaseblock1
-        let (hap1_preferences, hap2_preferences) = get_marriage_preferences(&counts, ploidy);
+        let (hap1_preferences, hap2_preferences) = 
+            get_marriage_preferences(&counts, ploidy);
         let mut hap1_rankings: Vec<HashMap<usize, usize>> = Vec::new();
         let mut hap2_rankings: Vec<HashMap<usize, usize>> = Vec::new();
         for hap1 in 0..ploidy {
             let mut rankings: HashMap<usize, usize> = HashMap::new();
-            for (rank, (_, hap2)) in hap1_preferences.iter().enumerate() {
-                rankings.insert(hap2, rank);
+            for (rank, (_, hap2)) in hap1_preferences[hap1].iter().enumerate() {
+                rankings.insert(*hap2, rank);
             }
             hap1_rankings.push(rankings);
         }
         for hap2 in 0..ploidy {
             let mut rankings: HashMap<usize, usize> = HashMap::new();
-            for (rank, (_, hap1)) in hap2_preferences.iter().enumerate() {
-                rankings.insert(hap1, rank);
+            for (rank, (_, hap1)) in hap2_preferences[hap2].iter().enumerate() {
+                rankings.insert(*hap1, rank);
             }
             hap2_rankings.push(rankings);
         }
         let mut has_proposed_to: Vec<HashSet<usize>> = Vec::new();
-        for h1 in 0..ploidy { has_proposed_to.push(HashSet::new()); }
+        for _h1 in 0..ploidy { has_proposed_to.push(HashSet::new()); }
         let mut suitor_engagements: HashMap<usize, usize> = HashMap::new();
-        let mut maiden_engagements: HashSet<usize, usize> = HashMap::new(); //
+        let mut maiden_engagements: HashMap<usize, usize> = HashMap::new(); 
+
         // step 1: In the first round, first a) each unengaged man proposes to the woman he prefers most, 
         // and then b) each woman replies "maybe" to her suitor she most prefers and "no" to all other 
         // suitors. She is then provisionally "engaged" to the suitor she most prefers so far, 
         // and that suitor is likewise provisionally engaged to her.
         let mut maidens_proposals: Vec<HashSet<usize>> = Vec::new(); 
         // each haplotype2_maiden could have multiple proposals
-        for hap2_maiden in 0..ploidy { maidens_proposals.push(HashSet::new()); }
+        for _hap2_maiden in 0..ploidy { maidens_proposals.push(HashSet::new()); }
         for haplotype1_suitor in 0..ploidy {
-            for (_, haplotype2_maiden) in hap1_preferences {
-                has_proposed_to[haplotype1_suitor].insert(haplotype2_maiden);
-                maidens_proposals.insert(haplotype1_suitor);
+            for (_, haplotype2_maiden) in hap1_preferences[haplotype1_suitor].iter() {
+                has_proposed_to[haplotype1_suitor].insert(*haplotype2_maiden);
+                maidens_proposals[*haplotype2_maiden].insert(haplotype1_suitor);
             }
         }
         for haplotype2_maiden in 0..ploidy {
-            for (_, haplotype1_suitor) in hap2_preferences {
+            for (_, haplotype1_suitor) in hap2_preferences[haplotype2_maiden].iter() {
                 if maidens_proposals[haplotype2_maiden].contains(haplotype1_suitor) {
-                    suitor_engagements.insert(haplotype1_suitor, haplotype2_maiden);
-                    maiden_engagements.insert(haplotype2_maiden, haplotype1_suitor);
+                    suitor_engagements.insert(*haplotype1_suitor, haplotype2_maiden);
+                    maiden_engagements.insert(haplotype2_maiden, *haplotype1_suitor);
                     break;
                 }
             }
@@ -426,46 +453,47 @@ fn do_something(counts: HashMap<(u8,u8),usize>, ploidy: usize) {
         // provisional partner who becomes unengaged). The provisional nature of engagements preserves 
         // the right of an already-engaged woman to "trade up" (and, in the process, to "jilt" 
         // her until-then partner).
-        while current_engagements.len() < ploidy {
+        while maiden_engagements.len() < ploidy {
             let mut maidens_proposals: Vec<HashSet<usize>> = Vec::new(); 
             // each haplotype2_maiden could have multiple proposals
             for hap2_maiden in 0..ploidy { maidens_proposals.push(HashSet::new()); }
 
             for haplotype1_suitor in 0..ploidy {
-                if suitor_engagements.contains_key(haplotype1_suitor) { continue; }
-                for (_, haplotype2_maiden) in hap1_preferences {
+                if suitor_engagements.contains_key(&haplotype1_suitor) { continue; }
+                for (_, haplotype2_maiden) in hap1_preferences[haplotype1_suitor].iter() {
                     if has_proposed_to[haplotype1_suitor].contains(haplotype2_maiden) { 
                         continue; 
                     } else {
-                        has_proposed_to[haplotype1_suitor].insert(haplotype2_maiden);
-                        maidens_proposals.insert(haplotype1_suitor);
+                        has_proposed_to[haplotype1_suitor].insert(*haplotype2_maiden);
+                        maidens_proposals[*haplotype2_maiden].insert(haplotype1_suitor);
                     }
                 }
             }
 
             for haplotype2_maiden in 0..ploidy {
                 let mut best_proposal: Option<usize> = None;
-                for (_, haplotype1_suitor) in hap2_preferences {
+                for (_, haplotype1_suitor) in hap2_preferences[haplotype2_maiden].iter() {
                     if maidens_proposals[haplotype2_maiden].contains(haplotype1_suitor) {
-                        best_proposal = Some(haplotype1_suitor);
+                        best_proposal = Some(*haplotype1_suitor);
                         break;
                     }
                 }
                 match best_proposal {
                     Some(hap1_suitor) => {
-                        if !maiden_engagements.contains_key(haplotype2_maiden) {
-
+                        if !maiden_engagements.contains_key(&haplotype2_maiden) {
+                            maiden_engagements.insert(haplotype2_maiden, hap1_suitor);
                         } else {
-                            let new_suitor_ranking = hap2_rankings[hap2_maiden].get(hap1_suitor).unwrap_or(usize::MAX);
-                            let former_suitor = maiden_engagements.get(haplotype2_maiden).unwrap();
-                            let former_suitor_ranking = hap2_rankings[hap2_maiden].get(former_suitor).unwrap_or(usize::MAX);
+                            let new_suitor_ranking = hap2_rankings[haplotype2_maiden].get(&hap1_suitor).unwrap_or(&usize::MAX);
+                            let former_suitor = *maiden_engagements.get(&haplotype2_maiden).unwrap();
+                            let former_suitor_ranking = hap2_rankings[haplotype2_maiden].get(&former_suitor).unwrap_or(&usize::MAX);
                             if new_suitor_ranking < former_suitor_ranking {
                                 // jilting former suitor
                                 maiden_engagements.insert(haplotype2_maiden, hap1_suitor);
-                                suitor_engagements.insert(haplotype1_suitor, haplotype2_maiden);
-                                suitor_engagements.remove(former_suitor);
+                                suitor_engagements.insert(hap1_suitor, haplotype2_maiden);
+                                suitor_engagements.remove(&former_suitor);
                             }
-                        },
+                        }
+                    },
                     None => (),
                 }
             }
@@ -478,25 +506,26 @@ fn do_something(counts: HashMap<(u8,u8),usize>, ploidy: usize) {
 fn get_marriage_preferences(counts: &HashMap<(u8,u8),usize>, ploidy: usize) -> 
     (Vec<Vec<(usize, usize)>>, Vec<Vec<(usize, usize)>>) { 
     let mut hap1_preferences: Vec<Vec<(usize, usize)>> = Vec::new();// (counts, haplotype2)
+    let mut hap2_preferences: Vec<Vec<(usize, usize)>> = Vec::new();
     for haplotype1 in 0..ploidy {
         let mut preference_counts: Vec<(usize, usize)> = Vec::new(); // (counts, haplotype2)
         for haplotype2 in 0..ploidy {
-            let count = counts.get(&(haplotype1, haplotype2)).unwrap_or(0);
-            preference_counts.push((count, haplotype2));
+            let count = counts.get(&(haplotype1 as u8, haplotype2 as u8)).unwrap_or(&0);
+            preference_counts.push((*count, haplotype2));
         }
         preference_counts.sort();
-        preverence_counts.reverse();
-        hap1_prefernces.push(preference_counts);
+        preference_counts.reverse();
+        hap1_preferences.push(preference_counts);
     }
     for haplotype2 in 0..ploidy {
         let mut preference_counts: Vec<(usize, usize)> = Vec::new(); // (counts, haplotype2)
         for haplotype1 in 0..ploidy {
-            let count = counts.get(&(haplotype1, haplotype2)).unwrap_or(0);
-            preference_counts.push((count, haplotype2));
+            let count = counts.get(&(haplotype1 as u8, haplotype2 as u8)).unwrap_or(&0);
+            preference_counts.push((*count, haplotype2));
         }
         preference_counts.sort();
-        preverence_counts.reverse();
-        hap2_prefernces.push(preference_counts);
+        preference_counts.reverse();
+        hap2_preferences.push(preference_counts);
     }
     (hap1_preferences, hap2_preferences)
 }
@@ -541,8 +570,8 @@ fn generate_pairings(pairings_so_far: Vec<(usize, usize)>, left_remaining: Vec<u
     return to_return;
 }
 
-fn binomial_test(cis: f32, trans: f32) -> f64 {
-    let min = cis.min(trans) as f64;
+fn binomial_test(cis: usize, trans: usize) -> f64 {
+    let min = cis.min(trans) as u64;
     let n = Binomial::new(0.5, (cis+trans) as u64).unwrap();
     let p_value = n.cdf(min) * 2.0;
     p_value
@@ -1308,7 +1337,7 @@ fn load_params() -> Params {
 
     let ploidy = params.value_of("ploidy").unwrap();
     let ploidy = ploidy.to_string().parse::<usize>().unwrap();
-    assert(ploidy != 1, "what are you doing trying to phase a haploid genome, ploidy cant be 1 here");
+    assert!(ploidy != 1, "what are you doing trying to phase a haploid genome, ploidy can't be 1 here");
 
     let allele_alignment_window = params.value_of("allele_alignment_window").unwrap();
     let allele_alignment_window = allele_alignment_window

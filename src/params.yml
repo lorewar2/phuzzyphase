@@ -27,12 +27,6 @@ args:
         takes_value: true
         required: true
         help: vcf file
-    - linked_read_bam:
-        long: linked_read_bam
-        short: l
-        takes_value: true
-        required: false
-        help: linked read aligned bam
     - hic_bam:
         long: hic_bam
         short: h
@@ -41,7 +35,7 @@ args:
         help: hic aligned bam
     - long_read_bam:
         long: long_read_bam
-        required: false
+        required: true
         takes_value: true
         help: long reads aligned bam
     - threads:
