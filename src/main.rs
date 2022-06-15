@@ -298,6 +298,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         .fetch(chrom, 0, None)
         .expect("some actual error");
     let hic_reads = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
+    println!("{} hic reads hitting > 1 variant", hic_reads.len());
     let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
     let mut allele_pair_counts: HashMap<(usize, usize), [u64; 4]> = HashMap::new();
     // ok that is a map from (phase_block_id, phase_block_id) to a map from (pb1_hap, pb2_hap) to counts
@@ -852,7 +853,7 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
                     }
                 }
             }
-            Err(_) => println!("fail"),
+            Err(_) => println!("no ref tag for this variant"),
         }
         match rec.format(alt_tag).string() {
             Ok(rec_format) => {
@@ -867,7 +868,7 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
                     }
                 }
             }
-            Err(_) => println!("fail"),
+            Err(_) => println!("no alt tag for this variant"),
         }
     }
     let mut to_return: Vec<Vec<Allele>> = Vec::new();
