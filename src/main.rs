@@ -303,27 +303,31 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             for j in (i+1)..hic_read.len() {
                 let allele1 = hic_read[i];
                 let allele2 = hic_read[j];
-                if allele1.index < allele2.index {
-                    let counts = allele_pair_counts.entry((allele1.index, allele2.index)).or_insert([0;4]);
-                    if allele1.allele && allele2.allele { // alt and alt
-                        counts[0] += 1;
-                    } else if allele1.allele && !allele2.allele { // alt and ref
-                        counts[1] += 1;
-                    } else if !allele1.allele && allele2.allele { // ref and alt
-                        counts[2] += 1;
-                    } else { // ref and ref
-                        counts[3] += 1;
-                    }
-                } else {
-                    let counts = allele_pair_counts.entry((allele2.index, allele1.index)).or_insert([0;4]);
-                    if allele2.allele && allele1.allele { // alt and alt
-                        counts[0] += 1;
-                    } else if allele2.allele && !allele1.allele { // alt and ref
-                        counts[1] += 1;
-                    } else if !allele2.allele && allele1.allele { // ref and alt
-                        counts[2] += 1;
-                    } else { // ref and ref
-                        counts[3] += 1;
+                let phase_block1 = phase_block_ids.get(&allele1.index).expect("if you are reading this, i screwed up");
+                let phase_block2 = phase_block_ids.get(&allele2.index).expect("why didnt the previous one fail first?");
+                if phase_block1 != phase_block2 {
+                    if allele1.index < allele2.index {
+                        let counts = allele_pair_counts.entry((allele1.index, allele2.index)).or_insert([0;4]);
+                        if allele1.allele && allele2.allele { // alt and alt
+                            counts[0] += 1;
+                        } else if allele1.allele && !allele2.allele { // alt and ref
+                            counts[1] += 1;
+                        } else if !allele1.allele && allele2.allele { // ref and alt
+                            counts[2] += 1;
+                        } else { // ref and ref
+                            counts[3] += 1;
+                        }
+                    } else {
+                        let counts = allele_pair_counts.entry((allele2.index, allele1.index)).or_insert([0;4]);
+                        if allele2.allele && allele1.allele { // alt and alt
+                            counts[0] += 1;
+                        } else if allele2.allele && !allele1.allele { // alt and ref
+                            counts[1] += 1;
+                        } else if !allele2.allele && allele1.allele { // ref and alt
+                            counts[2] += 1;
+                        } else { // ref and ref
+                            counts[3] += 1;
+                        }
                     }
                 }
                 let mut allele1_haps: Vec<u8> = Vec::new();
@@ -340,8 +344,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                         allele2_haps.push(haplotype as u8);
                     }
                 }
-                let phase_block1 = phase_block_ids.get(&allele1.index).expect("if you are reading this, i screwed up");
-                let phase_block2 = phase_block_ids.get(&allele2.index).expect("why didnt the previous one fail first?");
+                
                 if phase_block1 != phase_block2 {
                     let min = phase_block1.min(phase_block2);
                     let max = phase_block1.max(phase_block2);
@@ -357,8 +360,16 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
     }
 
+    // okay now i have allele_pair_counts which will contribute log likelihoods to phaseblock pairs
+    let all_possible_pairings = pairings(ploidy); // get all pairings
+    // each pairing implies a multinomial distribution on each pair of alleles
+    for ((allele1_index, allele2_index), counts) in allele_pair_counts.iter() {
+        let phase_block1 = phase_block_ids.get(&allele1_index).expect("if you are reading this, i screwed up");
+        let phase_block2 = phase_block_ids.get(&allele2_index).expect("why didnt the previous one fail first?");
+    }
 
 
+    /*
     let mut all_phase_block_alleles: HashMap<usize, HashMap<String, Allele>> = HashMap::new();
 
     let phase_block1 = 0;
@@ -369,7 +380,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         None => &empty,
     };
     do_something(&counts, data.ploidy);
-
+    */
 
 
 }
