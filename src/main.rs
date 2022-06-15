@@ -13,9 +13,12 @@ use std::process::Command;
 use std::{thread, time};
 
 use statrs::distribution::{Binomial};
+use statrs::distribution::Discrete;
 use bio::alignment::pairwise::banded;
 use bio::io::fasta;
 use bio::utils::TextSlice;
+
+use statrs::distribution::Multinomial;
 
 use failure::{Error, ResultExt};
 use flate2::read::MultiGzDecoder;
@@ -296,7 +299,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         .expect("some actual error");
     let hic_reads = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
     let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
-    let mut allele_pair_counts: HashMap<(usize, usize), [u8; 4]> = HashMap::new();
+    let mut allele_pair_counts: HashMap<(usize, usize), [u64; 4]> = HashMap::new();
     // ok that is a map from (phase_block_id, phase_block_id) to a map from (pb1_hap, pb2_hap) to counts
     for hic_read in hic_reads {
         for i in 0..hic_read.len() {
@@ -360,12 +363,74 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
     }
 
+    let mut phase_block_pair_phasing_log_likelihoods: HashMap<(usize, usize), HashMap<usize, f64>> = HashMap::new();
     // okay now i have allele_pair_counts which will contribute log likelihoods to phaseblock pairs
-    let all_possible_pairings = pairings(ploidy); // get all pairings
+    let all_possible_pairings = pairings(data.ploidy); // get all pairings
+    let log_phasing_prior = (1.0/(all_possible_pairings.len() as f64)).ln();
+    let error = 0.1; // TODO do not hard code
     // each pairing implies a multinomial distribution on each pair of alleles
     for ((allele1_index, allele2_index), counts) in allele_pair_counts.iter() {
+        let mut total_counts: u64 = 0;
+        for count in counts.iter() {
+            total_counts += *count as u64;
+        }
+        eprintln!("allele pair {} {}", allele1_index, allele2_index);
         let phase_block1 = phase_block_ids.get(&allele1_index).expect("if you are reading this, i screwed up");
         let phase_block2 = phase_block_ids.get(&allele2_index).expect("why didnt the previous one fail first?");
+        let min = phase_block1.min(phase_block2);
+        let max = phase_block1.max(phase_block2);
+        let phase_block_log_likelihoods = phase_block_pair_phasing_log_likelihoods.entry((*min, *max)).or_insert(HashMap::new());
+        for (pairing_index, haplotype_pairs) in all_possible_pairings.iter().enumerate() {
+            let log_likelihood = phase_block_log_likelihoods.entry(pairing_index).or_insert(log_phasing_prior);
+            eprintln!("\tmarriage {}:{:?}",pairing_index, haplotype_pairs);
+            let mut pair_probabilities: [f64;4] = [error;4];
+            let mut total = 0.0; // for normalization to sum to 1
+            for hap in 0..data.ploidy {
+                eprintln!("\t\thaplotype {} allele1 frac {}, allele2 frac {}", 
+                    hap, cluster_centers[hap][*allele1_index], cluster_centers[hap][*allele2_index]);
+            }
+            for (phase_block1_hap, phase_block2_hap) in haplotype_pairs.iter() {
+                let phase_block1_allele_frac = cluster_centers[*phase_block1_hap][*allele1_index] as f64;
+                let phase_block2_allele_frac = cluster_centers[*phase_block2_hap][*allele2_index] as f64;
+                pair_probabilities[0] += phase_block1_allele_frac * phase_block2_allele_frac;
+                pair_probabilities[1] += phase_block1_allele_frac * (1.0 - phase_block2_allele_frac);
+                pair_probabilities[2] += (1.0 - phase_block1_allele_frac) * phase_block2_allele_frac;
+                pair_probabilities[3] += (1.0 - phase_block1_allele_frac) * (1.0 - phase_block2_allele_frac);
+            }
+            for psuedocount in pair_probabilities.iter() { total += psuedocount; }
+            for index in 0..4 { pair_probabilities[index] /= total; } // normalize to sum to 1.0
+            eprintln!("\t\tfinal probabilities {:?}", pair_probabilities);
+            let multinomial_distribution = Multinomial::new(&pair_probabilities, total_counts).unwrap();
+           
+            *log_likelihood += multinomial_distribution.ln_pmf(counts);
+            eprintln!("\t\t\tlikelihood update {}, in log {}, total log {}",multinomial_distribution.pmf(counts), multinomial_distribution.ln_pmf(counts), log_likelihood);
+        }
+    }
+
+    // now for each phase block pair, we will normalize the pairing marginal log likelihoods to sum to 1 giving us
+    // posterior probabilities for each marriage
+    for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
+        let mut log_likelihoods:Vec<f32> = Vec::new();
+        let mut posteriors: Vec<f32> = Vec::new();
+        for i in 0..marriage_log_likelihoods.len() {
+            log_likelihoods.push(0.0);
+            posteriors.push(0.0);
+        }
+        for (pairing_index, log_likelihood) in marriage_log_likelihoods.iter() {
+            log_likelihoods[*pairing_index] = *log_likelihood as f32;
+        }
+        let log_denominator = log_sum_exp(&log_likelihoods);
+        let mut max = 0.0;
+        let mut max_index = 0;
+        for i in 0..marriage_log_likelihoods.len() {
+            posteriors[i] = (log_likelihoods[i] - log_denominator).exp();
+            if posteriors[i] >= max {
+                max = posteriors[i];
+                max_index = i;
+            }
+        }
+        eprintln!("after normalizing, phase blocks {} and {} with pairing {} and posterior {}", phase_block1, phase_block2, max_index, max);
+
     }
 
 
