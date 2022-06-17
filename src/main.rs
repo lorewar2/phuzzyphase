@@ -310,6 +310,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                 let phase_block1 = phase_block_ids.get(&allele1.index).expect("if you are reading this, i screwed up");
                 let phase_block2 = phase_block_ids.get(&allele2.index).expect("why didnt the previous one fail first?");
                 if phase_block1 != phase_block2 {
+
                     if allele1.index < allele2.index {
                         let counts = allele_pair_counts.entry((allele1.index, allele2.index)).or_insert([0;4]);
                         if allele1.allele && allele2.allele { // alt and alt
@@ -368,16 +369,16 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     // okay now i have allele_pair_counts which will contribute log likelihoods to phaseblock pairs
     let all_possible_pairings = pairings(data.ploidy); // get all pairings
     let log_phasing_prior = (1.0/(all_possible_pairings.len() as f64)).ln();
-    let error = 0.1; // TODO do not hard code
+    let error = 0.05; // TODO do not hard code
     // each pairing implies a multinomial distribution on each pair of alleles
     for ((allele1_index, allele2_index), counts) in allele_pair_counts.iter() {
         let mut total_counts: u64 = 0;
         for count in counts.iter() {
             total_counts += *count as u64;
         }
-        eprintln!("allele pair {} {}", allele1_index, allele2_index);
         let phase_block1 = phase_block_ids.get(&allele1_index).expect("if you are reading this, i screwed up");
         let phase_block2 = phase_block_ids.get(&allele2_index).expect("why didnt the previous one fail first?");
+        eprintln!("allele pair {} {} hitting phase blocks {} {}", allele1_index, allele2_index, phase_block1, phase_block2);
         let min = phase_block1.min(phase_block2);
         let max = phase_block1.max(phase_block2);
         let phase_block_log_likelihoods = phase_block_pair_phasing_log_likelihoods.entry((*min, *max)).or_insert(HashMap::new());
