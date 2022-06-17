@@ -378,7 +378,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
         let phase_block1 = phase_block_ids.get(&allele1_index).expect("if you are reading this, i screwed up");
         let phase_block2 = phase_block_ids.get(&allele2_index).expect("why didnt the previous one fail first?");
-        eprintln!("allele pair {} {} hitting phase blocks {} {}", allele1_index, allele2_index, phase_block1, phase_block2);
+        eprintln!("allele pair {} {} hitting phase blocks {} {} with counts {:?}", allele1_index, allele2_index, phase_block1, phase_block2, counts);
         let min = phase_block1.min(phase_block2);
         let max = phase_block1.max(phase_block2);
         let phase_block_log_likelihoods = phase_block_pair_phasing_log_likelihoods.entry((*min, *max)).or_insert(HashMap::new());
