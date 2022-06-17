@@ -82,7 +82,7 @@ fn _main() -> Result<(), Error> {
         .expect(&format!("error opening fasta index: {}", fai))
         .sequences();
     let mut chroms: Vec<String> = Vec::new();
-    chroms.push("20".to_string());
+    chroms.push("chr20".to_string());
     let mut chrom_lengths: Vec<u64> = Vec::new();
     chrom_lengths.push(63025520);
     /*for chrom in fa_index_iter {
@@ -151,7 +151,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     let chrom = vcf_reader
         .header()
         .name2rid(data.chrom.as_bytes())
-        .expect("cant get chrom rid");
+        .expect("can't get chrom rid, make sure vcf and bam and fasta contigs match!");
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let mut cluster_centers = init_cluster_centers(vcf_info.num_variants, &data);
     let mut window_start: usize = 0;
