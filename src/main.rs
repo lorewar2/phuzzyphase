@@ -1247,7 +1247,7 @@ fn get_read_assignments(
     let tid = bam
         .header()
         .tid(chrom.as_bytes())
-        .expect(format!("cannot find chrom tid {}", chrom));
+        .expect(&format!("cannot find chrom tid {}", chrom));
     bam.fetch((tid, pos as u32, (pos + 1) as u32))
         .expect("blah"); // skip to region of bam of this variant position
     let ref_start = (pos - window) as u64;
