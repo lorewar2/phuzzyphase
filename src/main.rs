@@ -1247,7 +1247,7 @@ fn get_read_assignments(
     let tid = bam
         .header()
         .tid(chrom.as_bytes())
-        .expect("cannot find chrom tid");
+        .expect(format!("cannot find chrom tid {}", chrom));
     bam.fetch((tid, pos as u32, (pos + 1) as u32))
         .expect("blah"); // skip to region of bam of this variant position
     let ref_start = (pos - window) as u64;
@@ -1316,9 +1316,9 @@ fn get_read_assignments(
         let ref_alignment = aligner.local(&seq, &ref_sequence);
         let alt_alignment = aligner.local(&seq, &alt_sequence);
         if ref_alignment.score > alt_alignment.score {
-            read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtff").to_string());
+            read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtff").replace(":","_").replace(";","-").to_string());
         } else if alt_alignment.score > ref_alignment.score {
-            read_names_alt.push(std::str::from_utf8(rec.qname()).expect("wtf").to_string());
+            read_names_alt.push(std::str::from_utf8(rec.qname()).expect("wtf").replace(":","_").replace(";","-").to_string());
         }
         //if pos == 69505 { println!("scores {} and {}",ref_alignment.score, alt_alignment.score);
         //println!("read_names_ref {}, read_names_alt {}", read_names_ref.len(), read_names_alt.len()); }
