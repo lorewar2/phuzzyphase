@@ -197,6 +197,13 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     end_index: last_attempted_index,
                     end_position: vcf_info.variant_positions[last_attempted_index],
                 });
+                println!(
+                    "PHASE BLOCK ENDING {}-{}, {}-{}",
+                    phase_block_start,
+                    last_attempted_index,
+                    vcf_info.variant_positions[phase_block_start],
+                    vcf_info.variant_positions[last_attempted_index]
+                );
                 phase_block_start = last_attempted_index + 1;
                 window_start = vcf_info.variant_positions[phase_block_start];
                 eprintln!("reseting window start to {}", window_start);
@@ -207,13 +214,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     cluster_centers[haplotype][phase_block_start] =
                         rng.gen::<f32>().min(0.98).max(0.02);
                 }
-                println!(
-                    "PHASE BLOCK ENDING {}-{}, {}-{}",
-                    phase_block_start,
-                    last_attempted_index,
-                    vcf_info.variant_positions[phase_block_start],
-                    vcf_info.variant_positions[last_attempted_index]
-                );
+                
                 continue 'outer;
             }
             cluster_center_delta = maximization(
@@ -251,7 +252,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         }
         window_start += data.phasing_window / 4;
         window_start = window_start.min(vcf_info.final_position as usize);
-        eprintln!("moving window start to {}", window_start);
+        //eprintln!("moving window start to {}", window_start);
         window_end += data.phasing_window / 4;
         window_end = window_end.min(vcf_info.final_position as usize);
         //break;
@@ -290,7 +291,9 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let mut phase_block_ids: HashMap<usize,usize> = HashMap::new();
     for (id, phase_block) in phase_blocks.iter().enumerate() {
+        eprintln!("phase block {} from {}-{}",id, phase_block.start_index, phase_block.end_index);
         for i in phase_block.start_index..(phase_block.end_index+1) {
+            //eprintln!("\tinserting phase block id {} for vardex {}", id, i);
             phase_block_ids.insert(i,id);
         }
     }
@@ -307,7 +310,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             for j in (i+1)..hic_read.len() {
                 let allele1 = hic_read[i];
                 let allele2 = hic_read[j];
-                let phase_block1 = phase_block_ids.get(&allele1.index).expect("if you are reading this, i screwed up");
+                let phase_block1 = phase_block_ids.get(&allele1.index).expect(&format!("if you are reading this, i screwed up, allele index {} not in a phase block", allele1.index));
                 let phase_block2 = phase_block_ids.get(&allele2.index).expect("why didnt the previous one fail first?");
                 if phase_block1 != phase_block2 {
 
@@ -749,7 +752,7 @@ fn maximization(
     }
     let mut total_change = 0.0;
     for (variant_index, haplotypes) in updates.iter() {
-        if variant_molecule_count.get(variant_index).unwrap() > &3 {
+        if variant_molecule_count.get(variant_index).unwrap() > &3 { // TODO dont hard code, make parameters
             //TODO Dont hard code stuff
             *min_index = (*min_index).min(*variant_index);
             *max_index = (*max_index).max(*variant_index);
