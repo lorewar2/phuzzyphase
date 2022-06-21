@@ -174,7 +174,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
             "fetching region {}:{}-{}",
             data.chrom, window_start, window_end
         );
-        let molecules = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIFI);
+        let (molecules, first_var_index, last_var_index) = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIFI);
         println!("{} molecules", molecules.len());
         let mut iteration = 0;
         let mut min_index: usize = 0;
@@ -215,6 +215,31 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                         rng.gen::<f32>().min(0.98).max(0.02);
                 }
                 
+                continue 'outer;
+            } if !in_phaseblock && breaking_point {
+                if first_var_index == usize::MAX { // there were no variants
+                    // we need to find a new starting point
+                    for (index, position) in vcf_info.variant_positions.iter().enumerate() {
+                        phase_block_start = index;
+                        if *position > window_end {
+                            break;
+                        }
+                    }
+                } else {
+                    eprintln!("unphased variants {}-{} positions {}-{}", first_var_index, last_var_index,
+                    vcf_info.variant_positions[first_var_index], vcf_info.variant_positions[last_var_index]);
+                    phase_block_start = last_var_index + 1;
+                }
+                
+                window_start = vcf_info.variant_positions[phase_block_start];
+                eprintln!("reseting window start to {}", window_start);
+                window_end = window_start + data.phasing_window;
+                let seed = [data.seed; 32];
+                let mut rng: StdRng = SeedableRng::from_seed(seed);
+                for haplotype in 0..cluster_centers.len() {
+                    cluster_centers[haplotype][phase_block_start] =
+                        rng.gen::<f32>().min(0.98).max(0.02);
+                }
                 continue 'outer;
             }
             cluster_center_delta = maximization(
@@ -300,7 +325,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     vcf_reader
         .fetch(chrom, 0, None)
         .expect("some actual error");
-    let hic_reads = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
+    let (hic_reads, _, _) = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
     println!("{} hic reads hitting > 1 variant", hic_reads.len());
     let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
     let mut allele_pair_counts: HashMap<(usize, usize), [u64; 4]> = HashMap::new();
@@ -310,6 +335,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             for j in (i+1)..hic_read.len() {
                 let allele1 = hic_read[i];
                 let allele2 = hic_read[j];
+                if !phase_block_ids.contains_key(&allele1.index) || !phase_block_ids.contains_key(&allele2.index) { continue; }
                 let phase_block1 = phase_block_ids.get(&allele1.index).expect(&format!("if you are reading this, i screwed up, allele index {} not in a phase block", allele1.index));
                 let phase_block2 = phase_block_ids.get(&allele2.index).expect("why didnt the previous one fail first?");
                 if phase_block1 != phase_block2 {
@@ -821,7 +847,7 @@ enum READ_TYPE {
     HIFI, HIC,
 }
 
-fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_type: READ_TYPE) -> Vec<Vec<Allele>> {
+fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_type: READ_TYPE) -> (Vec<Vec<Allele>>, usize, usize) {
     let mut molecules: HashMap<String, Vec<Allele>> = HashMap::new();
     let ref_tag;
     let alt_tag;
@@ -835,7 +861,8 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
             alt_tag = b"AH";
         }
     }
-
+    let mut last_var_index = 0;
+    let mut first_var_index = usize::MAX;
     for rec in vcf.records() {
         let rec = rec.expect("couldnt unwrap record");
         let pos = rec.pos();
@@ -843,6 +870,8 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
             .position_to_index
             .get(&(pos as usize))
             .expect("please don't do this to me");
+        last_var_index = *var_index;
+        if first_var_index == usize::MAX { first_var_index = *var_index; }
 
         match rec.format(ref_tag).string() { 
             Ok(rec_format) => {
@@ -886,7 +915,7 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
         }
         to_return.push(mol);
     }
-    to_return
+    (to_return, first_var_index, last_var_index)
 }
 
 #[derive(Clone, Copy)]
