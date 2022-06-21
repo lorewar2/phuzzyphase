@@ -154,8 +154,9 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         .expect("can't get chrom rid, make sure vcf and bam and fasta contigs match!");
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let mut cluster_centers = init_cluster_centers(vcf_info.num_variants, &data);
-    let mut window_start: usize = 0;
-    let mut window_end: usize = data.phasing_window;
+    let debug_bump = 1000000;
+    let mut window_start: usize = debug_bump;
+    let mut window_end: usize = window_start + data.phasing_window;
     //let mut position_to_index: HashMap<usize, usize> = HashMap::new();
     //let mut position_so_far: usize = 0;
     let mut phase_blocks: Vec<PhaseBlock> = Vec::new();
@@ -219,12 +220,14 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
             } if !in_phaseblock && breaking_point {
                 if first_var_index == usize::MAX { // there were no variants
                     // we need to find a new starting point
+                    
                     for (index, position) in vcf_info.variant_positions.iter().enumerate() {
                         phase_block_start = index;
                         if *position > window_end {
                             break;
                         }
                     }
+                    eprintln!("unable to start phaseblock, resetting");
                 } else {
                     eprintln!("unphased variants {}-{} positions {}-{}", first_var_index, last_var_index,
                     vcf_info.variant_positions[first_var_index], vcf_info.variant_positions[last_var_index]);
