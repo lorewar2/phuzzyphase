@@ -154,7 +154,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         .expect("can't get chrom rid, make sure vcf and bam and fasta contigs match!");
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let mut cluster_centers = init_cluster_centers(vcf_info.num_variants, &data);
-    let debug_bump = 1000000;
+    let debug_bump = 0;
     let mut window_start: usize = debug_bump;
     let mut window_end: usize = window_start + data.phasing_window;
     //let mut position_to_index: HashMap<usize, usize> = HashMap::new();
@@ -171,12 +171,12 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         vcf_reader
             .fetch(chrom, window_start as u64, Some(window_end as u64))
             .expect("some actual error");
-        println!(
-            "fetching region {}:{}-{}",
-            data.chrom, window_start, window_end
-        );
+        //println!(
+        //    "fetching region {}:{}-{}",
+        //    data.chrom, window_start, window_end
+        //);
         let (molecules, first_var_index, last_var_index) = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIFI);
-        println!("{} molecules", molecules.len());
+        //println!("{} molecules", molecules.len());
         let mut iteration = 0;
         let mut min_index: usize = 0;
         let mut max_index: usize = 0;
@@ -262,10 +262,11 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
 
             iteration += 1;
         }
-        println!(
-            "converged in {} iterations, min {} max {}",
-            iteration, min_index, max_index
-        );
+        //println!(
+        //    "converged in {} iterations, min {} max {}",
+        //    iteration, min_index, max_index
+        //);
+        /*
         for haplotype in 0..cluster_centers.len() {
             print!("haplotype {}\t", haplotype);
             for variant in min_index..max_index {
@@ -278,6 +279,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
             }
             println!();
         }
+        */
         window_start += data.phasing_window / 4;
         window_start = window_start.min(vcf_info.final_position as usize);
         //eprintln!("moving window start to {}", window_start);
@@ -319,7 +321,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let mut phase_block_ids: HashMap<usize,usize> = HashMap::new();
     for (id, phase_block) in phase_blocks.iter().enumerate() {
-        eprintln!("phase block {} from {}-{}",id, phase_block.start_index, phase_block.end_index);
+        //eprintln!("phase block {} from {}-{}",id, phase_block.start_index, phase_block.end_index);
         for i in phase_block.start_index..(phase_block.end_index+1) {
             //eprintln!("\tinserting phase block id {} for vardex {}", id, i);
             phase_block_ids.insert(i,id);
@@ -410,19 +412,19 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
         let phase_block1 = phase_block_ids.get(&allele1_index).expect("if you are reading this, i screwed up");
         let phase_block2 = phase_block_ids.get(&allele2_index).expect("why didnt the previous one fail first?");
-        eprintln!("allele pair {} {} hitting phase blocks {} {} with counts {:?}", allele1_index, allele2_index, phase_block1, phase_block2, counts);
+        //eprintln!("allele pair {} {} hitting phase blocks {} {} with counts {:?}", allele1_index, allele2_index, phase_block1, phase_block2, counts);
         let min = phase_block1.min(phase_block2);
         let max = phase_block1.max(phase_block2);
         let phase_block_log_likelihoods = phase_block_pair_phasing_log_likelihoods.entry((*min, *max)).or_insert(HashMap::new());
         for (pairing_index, haplotype_pairs) in all_possible_pairings.iter().enumerate() {
             let log_likelihood = phase_block_log_likelihoods.entry(pairing_index).or_insert(log_phasing_prior);
-            eprintln!("\tmarriage {}:{:?}",pairing_index, haplotype_pairs);
+            //eprintln!("\tmarriage {}:{:?}",pairing_index, haplotype_pairs);
             let mut pair_probabilities: [f64;4] = [error;4];
             let mut total = 0.0; // for normalization to sum to 1
-            for hap in 0..data.ploidy {
-                eprintln!("\t\thaplotype {} allele1 frac {}, allele2 frac {}", 
-                    hap, cluster_centers[hap][*allele1_index], cluster_centers[hap][*allele2_index]);
-            }
+            //for hap in 0..data.ploidy {
+            //    eprintln!("\t\thaplotype {} allele1 frac {}, allele2 frac {}", 
+            //        hap, cluster_centers[hap][*allele1_index], cluster_centers[hap][*allele2_index]);
+            //}
             for (phase_block1_hap, phase_block2_hap) in haplotype_pairs.iter() {
                 let phase_block1_allele_frac = cluster_centers[*phase_block1_hap][*allele1_index] as f64;
                 let phase_block2_allele_frac = cluster_centers[*phase_block2_hap][*allele2_index] as f64;
@@ -433,11 +435,11 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             }
             for psuedocount in pair_probabilities.iter() { total += psuedocount; }
             for index in 0..4 { pair_probabilities[index] /= total; } // normalize to sum to 1.0
-            eprintln!("\t\tfinal probabilities {:?}", pair_probabilities);
+            //eprintln!("\t\tfinal probabilities {:?}", pair_probabilities);
             let multinomial_distribution = Multinomial::new(&pair_probabilities, total_counts).unwrap();
            
             *log_likelihood += multinomial_distribution.ln_pmf(counts);
-            eprintln!("\t\t\tlikelihood update {}, in log {}, total log {}",multinomial_distribution.pmf(counts), multinomial_distribution.ln_pmf(counts), log_likelihood);
+            //eprintln!("\t\t\tlikelihood update {}, in log {}, total log {}",multinomial_distribution.pmf(counts), multinomial_distribution.ln_pmf(counts), log_likelihood);
         }
     }
 
@@ -464,7 +466,6 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             }
         }
         eprintln!("after normalizing, phase blocks {} and {} with pairing {} and posterior {}", phase_block1, phase_block2, max_index, max);
-
     }
 
 
@@ -1037,9 +1038,9 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
                     &mut new_rec,
                 );
             }
-            if hets > 2000 {
-                break;
-            } //TODO remove, for small example
+            //if hets > 2000 {
+            //    break;
+            //} //TODO remove, for small example
         }
         println!(
             "done, saw {} records of which {} were hets in chrom {}",
