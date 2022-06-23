@@ -435,7 +435,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     // okay now i have allele_pair_counts which will contribute log likelihoods to phaseblock pairs
     let all_possible_pairings = pairings(data.ploidy); // get all pairings
     let log_phasing_prior = (1.0/(all_possible_pairings.len() as f64)).ln();
-    let error = 0.05; // TODO do not hard code
+    let error = 0.2; // TODO do not hard code
     // each pairing implies a multinomial distribution on each pair of alleles
     for ((allele1_index, allele2_index), counts) in allele_pair_counts.iter() {
         let mut total_counts: u64 = 0;
