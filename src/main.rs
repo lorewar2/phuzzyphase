@@ -540,7 +540,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                                 *count += 1;
                                 let count = problem_phaseblocks.entry(*phase_block2).or_insert(0);
                                 *count += 1;
-                                let count = problem_phaseblocks.entry(*phase_block3).or_insert(0);
+                                let count = problem_phaseblocks.entry(*phase_block4).or_insert(0);
                                 *count += 1;
                             }
                         },
