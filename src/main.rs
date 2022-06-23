@@ -302,12 +302,13 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     println!("DONE!");
     for (id, phase_block) in phase_blocks.iter().enumerate() {
         println!(
-            "phase block {} from {}-{}, {}-{}",
+            "phase block {} from {}-{}, {}-{} length {}",
             id,
             phase_block.start_position,
             phase_block.end_position,
             phase_block.start_index,
-            phase_block.end_index
+            phase_block.end_index,
+            phase_block.end_position - phase_block.start_position
         );
     }
     // get phaseblock N50... 
@@ -503,6 +504,29 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         let new_phaseblock = new_phaseblocks.entry(*label).or_insert(Vec::new());
         new_phaseblock.push(phase_block_id);
     }
+    // get phaseblock N50... 
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut total: usize = 0;
+    for (new_id, old_phase_block_ids) in new_phaseblocks.iter() {
+        let mut total_length = 0;
+        for old_block_id in old_phase_block_ids {
+            let length = phase_blocks[*old_block_id].end_position - phase_blocks[*old_block_id].start_position;
+            total_length += length;
+        }
+        sizes.push(total_length);
+        total += total_length;
+    }
+    println!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
+    sizes.sort_by(|a, b| b.cmp(a));
+    let mut so_far = 0;
+    for size in sizes {
+        so_far += size;
+        if so_far > total/2 {
+            println!("After hic phasing the N50 phase blocks for chrom {} is {}", data.chrom, size);
+            break;
+        }
+    }
+    
 
 
 }
