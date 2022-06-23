@@ -5,6 +5,7 @@ extern crate hashbrown;
 extern crate rand;
 extern crate rayon;
 extern crate statrs;
+extern crate petgraph;
 
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -17,6 +18,7 @@ use statrs::distribution::Discrete;
 use bio::alignment::pairwise::banded;
 use bio::io::fasta;
 use bio::utils::TextSlice;
+use petgraph::unionfind::UnionFind;
 
 use statrs::distribution::Multinomial;
 
@@ -116,6 +118,7 @@ fn _main() -> Result<(), Error> {
             phasing_window: params.phasing_window,
             seed: params.seed,
             ploidy: params.ploidy,
+            hic_phasing_posterior_threshold: params.hic_phasing_posterior_threshold,
         };
         chunks.push(data);
     }
@@ -307,6 +310,24 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
             phase_block.end_index
         );
     }
+    // get phaseblock N50... 
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut total: usize = 0;
+    for phase_block in phase_blocks.iter() {
+        let length = phase_block.end_position - phase_block.start_position;
+        sizes.push(length);
+        total += length;
+    }
+    sizes.sort_by(|a, b| b.cmp(a));
+    let mut so_far = 0;
+    for size in sizes {
+        so_far += size;
+        if so_far > total/2 {
+            println!("N50 phase blocks from long reads for chrom {} is {}", data.chrom, size);
+            break;
+        }
+    }
+
     let new_phase_blocks = phase_phaseblocks(data, &mut cluster_centers, &phase_blocks);
     output_phased_vcf(data, cluster_centers, phase_blocks);
     Ok(())
@@ -443,7 +464,9 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             //eprintln!("\t\t\tlikelihood update {}, in log {}, total log {}",multinomial_distribution.pmf(counts), multinomial_distribution.ln_pmf(counts), log_likelihood);
         }
     }
-
+    
+    
+    let mut union_find: UnionFind<usize> = UnionFind::new(phase_blocks.len());
     // now for each phase block pair, we will normalize the pairing marginal log likelihoods to sum to 1 giving us
     // posterior probabilities for each marriage
     for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
@@ -467,21 +490,19 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             }
         }
         eprintln!("after normalizing, phase blocks {} and {} with pairing {} and posterior {}", phase_block1, phase_block2, max_index, max);
+        if max > data.hic_phasing_posterior_threshold {
+            union_find.union(*phase_block1, *phase_block2);
+        }
     }
 
 
-    /*
-    let mut all_phase_block_alleles: HashMap<usize, HashMap<String, Allele>> = HashMap::new();
 
-    let phase_block1 = 0;
-    let phase_block2 = 1; //TODODODOD go back and make code to reduce to 2
-    let empty: HashMap<(u8, u8), usize> = HashMap::new();
-    let counts = match all_counts.get(&(phase_block1, phase_block2)) {
-        Some(x) => x,
-        None => &empty,
-    };
-    do_something(&counts, data.ploidy);
-    */
+    let labeling = union_find.into_labeling();
+    let mut new_phaseblocks: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (phase_block_id, label) in labeling.iter().enumerate() {
+        let new_phaseblock = new_phaseblocks.entry(*label).or_insert(Vec::new());
+        new_phaseblock.push(phase_block_id);
+    }
 
 
 }
@@ -1404,6 +1425,7 @@ struct ThreadData {
     phasing_window: usize,
     seed: u8,
     ploidy: usize,
+    hic_phasing_posterior_threshold: f32,
 }
 
 #[derive(Clone)]
@@ -1420,6 +1442,7 @@ struct Params {
     min_base_qual: u8,
     window: usize,
     phasing_window: usize,
+    hic_phasing_posterior_threshold: f32,
 }
 
 fn load_params() -> Params {
@@ -1447,6 +1470,10 @@ fn load_params() -> Params {
 
     let min_base_qual = params.value_of("min_base_qual").unwrap();
     let min_base_qual = min_base_qual.to_string().parse::<u8>().unwrap();
+
+    let hic_phasing_posterior_threshold = params.value_of("phasing_posterior_threshold").unwrap();
+    let hic_phasing_posterior_threshold = hic_phasing_posterior_threshold.to_string().parse::<f32>().unwrap();
+
 
     let fasta = params.value_of("fasta").unwrap();
 
@@ -1478,5 +1505,6 @@ fn load_params() -> Params {
         min_base_qual: min_base_qual,
         window: allele_alignment_window,
         phasing_window: phasing_window,
+        hic_phasing_posterior_threshold: hic_phasing_posterior_threshold,
     }
 }
