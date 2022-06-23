@@ -505,6 +505,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
     }
 
+    let mut problem_phaseblocks: HashMap<usize, usize> = HashMap::new();// map from phase block to the number of triangles it ruins
     for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
         for ((phase_block3, phase_block4), marriage_log_likelihoods2) in phase_block_pair_phasing_log_likelihoods.iter() {
             if phase_block1 == phase_block3 {
@@ -518,16 +519,29 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                     match phase_block_pair_phasing_log_likelihoods.get(&(*min, *max)) {
                         Some(marriage_log_likelihoods3) => {
                             let (edge3, post3) = get_posterior(marriage_log_likelihoods3);
+                            let mut problem = false;
                             if edge1 == 0 && edge2 == 0 && edge3 == 1 {
                                 eprintln!("yeah we have a problem");
+                                problem = true;
                             } else if edge1 == 0 && edge2 == 1 && edge3 == 0 {
                                 eprintln!("yeah we have a problem2");
+                                problem = true;
                             } else if edge1 == 1 && edge2 == 0 && edge3 == 0 {
+                                problem = true;
                                 eprintln!("yeah we have a problem3");
                             } else if edge1 == 1 && edge2 == 1 && edge3 == 1 {
                                 eprintln!("yeah we have a problem4");
+                                problem = true;
                             } else {
                                 eprintln!("triangle {} - {} - {} consistent", edge1, edge2, edge3);
+                            }
+                            if problem {
+                                let count = problem_phaseblocks.entry(*phase_block1).or_insert(0);
+                                *count += 1;
+                                let count = problem_phaseblocks.entry(*phase_block2).or_insert(0);
+                                *count += 1;
+                                let count = problem_phaseblocks.entry(*phase_block3).or_insert(0);
+                                *count += 1;
                             }
                         },
                         None => (),
@@ -536,7 +550,11 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             }
         }
     }
+    let mut count_vec: Vec<(&usize, &usize)> = problem_phaseblocks.iter().collect();
+    count_vec.sort_by(|a, b| b.1.cmp(a.1));
 
+
+    println!("problem phaseblocks ruining triangles {:?}", count_vec);
 
 
     let labeling = union_find.into_labeling();
