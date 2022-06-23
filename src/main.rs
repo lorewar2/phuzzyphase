@@ -1471,7 +1471,7 @@ fn load_params() -> Params {
     let min_base_qual = params.value_of("min_base_qual").unwrap();
     let min_base_qual = min_base_qual.to_string().parse::<u8>().unwrap();
 
-    let hic_phasing_posterior_threshold = params.value_of("phasing_posterior_threshold").unwrap();
+    let hic_phasing_posterior_threshold = params.value_of("hic_phasing_posterior_threshold").unwrap();
     let hic_phasing_posterior_threshold = hic_phasing_posterior_threshold.to_string().parse::<f32>().unwrap();
 
 
