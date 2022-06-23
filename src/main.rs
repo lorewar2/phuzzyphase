@@ -300,17 +300,26 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     });
 
     println!("DONE!");
+    let mut total_gap_length = 0;
     for (id, phase_block) in phase_blocks.iter().enumerate() {
+        let mut gap = phase_block.start_position;
+        if id > 0 {
+            gap = phase_block.start_position - phase_blocks[id - 1].end_position;
+        }
+        total_gap_length += gap;
         println!(
-            "phase block {} from {}-{}, {}-{} length {}",
+            "phase block {} from {}-{}, {}-{} length {} with gap from last of {}",
             id,
             phase_block.start_position,
             phase_block.end_position,
             phase_block.start_index,
             phase_block.end_index,
-            phase_block.end_position - phase_block.start_position
+            phase_block.end_position - phase_block.start_position,
+            gap
         );
     }
+    println!("and final gap of {}", (data.chrom_length as usize) - phase_blocks[phase_blocks.len() - 1].end_position);
+    println!("with total gap length of {}", total_gap_length);
     // get phaseblock N50... 
     let mut sizes: Vec<usize> = Vec::new();
     let mut total: usize = 0;
