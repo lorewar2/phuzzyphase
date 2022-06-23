@@ -505,6 +505,38 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
     }
 
+    for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
+        for ((phase_block3, phase_block4), marriage_log_likelihoods2) in phase_block_pair_phasing_log_likelihoods.iter() {
+            if phase_block1 == phase_block3 {
+                if union_find.equiv(*phase_block1, *phase_block2) && 
+                    union_find.equiv(*phase_block2, *phase_block3) && 
+                    union_find.equiv(*phase_block3, *phase_block4) {
+                    let (edge1, post) = get_posterior(marriage_log_likelihoods);
+                    let (edge2, post2) = get_posterior(marriage_log_likelihoods2);
+                    let min = phase_block2.min(phase_block4);
+                    let max = phase_block2.max(phase_block4);
+                    match phase_block_pair_phasing_log_likelihoods.get(&(*min, *max)) {
+                        Some(marriage_log_likelihoods3) => {
+                            let (edge3, post3) = get_posterior(marriage_log_likelihoods3);
+                            if edge1 == 0 && edge2 == 0 && edge3 == 1 {
+                                eprintln!("yeah we have a problem");
+                            } else if edge1 == 0 && edge2 == 1 && edge3 == 0 {
+                                eprintln!("yeah we have a problem2");
+                            } else if edge1 == 1 && edge2 == 0 && edge3 == 0 {
+                                eprintln!("yeah we have a problem3");
+                            } else if edge1 == 1 && edge2 == 1 && edge3 == 1 {
+                                eprintln!("yeah we have a problem4");
+                            } else {
+                                eprintln!("triangle {} - {} - {} consistent", edge1, edge2, edge3);
+                            }
+                        },
+                        None => (),
+                    }
+                }
+            }
+        }
+    }
+
 
 
     let labeling = union_find.into_labeling();
@@ -540,6 +572,29 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     
 
 
+}
+
+fn get_posterior(marriage_log_likelihoods: &HashMap<usize,f64>) -> (usize, f32) {
+    let mut log_likelihoods:Vec<f32> = Vec::new();
+    let mut posteriors: Vec<f32> = Vec::new();
+    for i in 0..marriage_log_likelihoods.len() {
+        log_likelihoods.push(0.0);
+        posteriors.push(0.0);
+    }
+    for (pairing_index, log_likelihood) in marriage_log_likelihoods.iter() {
+        log_likelihoods[*pairing_index] = *log_likelihood as f32;
+    }
+    let log_denominator = log_sum_exp(&log_likelihoods);
+    let mut max = 0.0;
+    let mut max_index = 0;
+    for i in 0..marriage_log_likelihoods.len() {
+        posteriors[i] = (log_likelihoods[i] - log_denominator).exp();
+        if posteriors[i] >= max {
+            max = posteriors[i];
+            max_index = i;
+        }
+    }
+    (max_index, max)
 }
 
 fn do_something(counts: &HashMap<(u8,u8),usize>, ploidy: usize) {
