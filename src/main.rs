@@ -199,11 +199,12 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     end_position: vcf_info.variant_positions[last_attempted_index],
                 });
                 println!(
-                    "PHASE BLOCK ENDING {}-{}, {}-{}",
+                    "PHASE BLOCK ENDING {}-{}, {}-{} length {}",
                     phase_block_start,
                     last_attempted_index,
                     vcf_info.variant_positions[phase_block_start],
-                    vcf_info.variant_positions[last_attempted_index]
+                    vcf_info.variant_positions[last_attempted_index],
+                    vcf_info.variant_positions[last_attempted_index] - vcf_info.variant_positions[phase_block_start]
                 );
                 phase_block_start = last_attempted_index + 1;
                 window_start = vcf_info.variant_positions[phase_block_start];
@@ -890,7 +891,7 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
                     }
                 }
             }
-            Err(_) => println!("no ref tag for this variant"),
+            Err(_) => (),
         }
         match rec.format(alt_tag).string() {
             Ok(rec_format) => {
@@ -905,7 +906,7 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
                     }
                 }
             }
-            Err(_) => println!("no alt tag for this variant"),
+            Err(_) => (),
         }
     }
     let mut to_return: Vec<Vec<Allele>> = Vec::new();
