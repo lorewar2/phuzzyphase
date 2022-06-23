@@ -184,10 +184,10 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         while cluster_center_delta > 0.01 {
             let (breaking_point, posteriors) = expectation(&molecules, &cluster_centers);
             if in_phaseblock && breaking_point {
-                println!(
-                    "BREAKING due to no posteriors differing... window {}-{}",
-                    window_start, window_end
-                );
+                //println!(
+                //    "BREAKING due to no posteriors differing... window {}-{}",
+                //    window_start, window_end
+                //);
                 in_phaseblock = false;
                 while cluster_centers[0][last_attempted_index] == 0.5 {
                     last_attempted_index -= 1;
@@ -228,15 +228,15 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                             break;
                         }
                     }
-                    eprintln!("unable to start phaseblock, resetting");
+                    //eprintln!("unable to start phaseblock, resetting");
                 } else {
-                    eprintln!("unphased variants {}-{} positions {}-{}", first_var_index, last_var_index,
-                    vcf_info.variant_positions[first_var_index], vcf_info.variant_positions[last_var_index]);
+                    //eprintln!("unphased variants {}-{} positions {}-{}", first_var_index, last_var_index,
+                    //vcf_info.variant_positions[first_var_index], vcf_info.variant_positions[last_var_index]);
                     phase_block_start = last_var_index + 1;
                 }
                 
                 window_start = vcf_info.variant_positions[phase_block_start];
-                eprintln!("reseting window start to {}", window_start);
+                //eprintln!("reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
                 let seed = [data.seed; 32];
                 let mut rng: StdRng = SeedableRng::from_seed(seed);
