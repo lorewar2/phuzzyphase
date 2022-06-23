@@ -508,6 +508,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     let mut problem_phaseblocks: HashMap<usize, usize> = HashMap::new();// map from phase block to the number of triangles it ruins
     for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
         for ((phase_block3, phase_block4), marriage_log_likelihoods2) in phase_block_pair_phasing_log_likelihoods.iter() {
+            if *phase_block1 == 275 || *phase_block4 == 275 { continue; } //TODO remove
             if phase_block1 == phase_block3 {
                 if union_find.equiv(*phase_block1, *phase_block2) && 
                     union_find.equiv(*phase_block2, *phase_block3) && 
