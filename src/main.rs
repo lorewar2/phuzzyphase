@@ -208,7 +208,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 );
                 phase_block_start = last_attempted_index + 1;
                 window_start = vcf_info.variant_positions[phase_block_start];
-                eprintln!("reseting window start to {}", window_start);
+                //eprintln!("reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
                 let seed = [data.seed; 32];
                 let mut rng: StdRng = SeedableRng::from_seed(seed);
