@@ -517,6 +517,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         total += total_length;
     }
     println!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
+    println!("{:?}", sizes);
     sizes.sort_by(|a, b| b.cmp(a));
     let mut so_far = 0;
     for size in sizes {
