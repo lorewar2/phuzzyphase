@@ -519,6 +519,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     println!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
     sizes.sort_by(|a, b| b.cmp(a));
     println!("{:?}", sizes);
+    println!("total length of phased region for chrom {} is {} vs chrom length of {}", data.chrom, total, data.chrom_length);
     let mut so_far = 0;
     for size in sizes {
         so_far += size;
