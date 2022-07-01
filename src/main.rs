@@ -375,13 +375,14 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
             let end_position = vcf_info.variant_positions[end_index];
             let position = vcf_info.variant_positions[breakpoint];
             vcf_reader
-                .fetch(chrom, position as u64, None)
+                .fetch(chrom, position as u64, Some(position as u64))
                 .expect("could not fetch in vcf");
                 let (molecules, first_var_index, last_var_index)  = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
             eprintln!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, positions {}-{}, posterior {}, breakpoint {} position {} with {} molecules", 
                 start_index, end_index, start_position, end_position, posterior, breakpoint, position, molecules.len());
             let (_break, posteriors, log_likelihood) = expectation(&molecules, &cluster_centers);
-            eprintln!("mol posteriors {:?}", posteriors);
+            //eprintln!("mol posteriors {:?}", posteriors);
+
             eprintln!("hap1 {:?}", &cluster_centers[0][(breakpoint-5)..(breakpoint+5)]);
             eprintln!("hap2 {:?}", &cluster_centers[1][(breakpoint-5)..(breakpoint+5)]);
         
@@ -393,7 +394,11 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
 }
 
 fn swap(cluster_centers: &mut Vec<Vec<f32>>, breakpoint: usize, pairing: &Vec<(usize, usize)>, length: usize) {
+    let mut touched: HashSet<usize> = HashSet::new();
     for (hap1, hap2) in pairing {
+        if touched.contains(hap1) { continue; }
+        touched.insert(*hap1);
+        touched.insert(*hap2);
         for locus in (breakpoint+1)..(breakpoint+1+length) {
             if locus < cluster_centers[0].len() {
                 let tmp = cluster_centers[*hap1][locus];
