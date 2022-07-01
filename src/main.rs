@@ -196,6 +196,8 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 while cluster_centers[0][last_attempted_index] == 0.5 {
                     last_attempted_index -= 1;
                 }
+                
+                let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
                 phase_blocks.push(PhaseBlock {
                     start_index: phase_block_start,
                     start_position: vcf_info.variant_positions[phase_block_start],
@@ -292,8 +294,8 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         window_end = window_end.min(vcf_info.final_position as usize);
         //break;
     }
-    let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
 
+    let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
     phase_blocks.push(PhaseBlock {
         start_index: phase_block_start,
         start_position: vcf_info.variant_positions[phase_block_start],
