@@ -360,7 +360,7 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
             swap(cluster_centers, breakpoint, &pairing, 50);
             let position = vcf_info.variant_positions[breakpoint];
             vcf_reader
-                .fetch(chrom, position as u64, Some(position as u64))
+                .fetch(chrom, (position as u64).checked_sub(15000).unwrap_or(0), Some(position as u64 + 15000)) // TODO dont hard code things
                 .expect("could not fetch in vcf");
             let (molecules, first_var_index, last_var_index) = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
             let (_break, _posteriors, log_likelihood) = expectation(&molecules, &cluster_centers);
@@ -375,7 +375,7 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
             let end_position = vcf_info.variant_positions[end_index];
             let position = vcf_info.variant_positions[breakpoint];
             vcf_reader
-                .fetch(chrom, position as u64, Some(position as u64))
+                .fetch(chrom, (position as u64).checked_sub(15000).unwrap_or(0), Some(position as u64))
                 .expect("could not fetch in vcf");
                 let (molecules, first_var_index, last_var_index)  = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
             eprintln!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, positions {}-{}, posterior {}, breakpoint {} position {} with {} molecules", 
