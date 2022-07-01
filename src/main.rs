@@ -386,9 +386,7 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
             eprintln!("hap1 {:?}", &cluster_centers[0][(breakpoint-5)..(breakpoint+5)]);
             eprintln!("hap2 {:?}", &cluster_centers[1][(breakpoint-5)..(breakpoint+5)]);
         
-        } else {
-            eprintln!("yay, we did it right");
-        }
+        } 
     }
     to_return
 }
