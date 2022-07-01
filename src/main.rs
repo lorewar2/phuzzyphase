@@ -637,6 +637,38 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     }
     
 
+    let labeling = union_find.into_labeling();
+    let mut new_phaseblocks: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (phase_block_id, label) in labeling.iter().enumerate() {
+        let new_phaseblock = new_phaseblocks.entry(*label).or_insert(Vec::new());
+        new_phaseblock.push(phase_block_id);
+    }
+    // get phaseblock N50... 
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut total: usize = 0;
+    for (new_id, old_phase_block_ids) in new_phaseblocks.iter() {
+        let mut total_length = 0;
+        for old_block_id in old_phase_block_ids {
+            let length = phase_blocks[*old_block_id].end_position - phase_blocks[*old_block_id].start_position;
+            total_length += length;
+        }
+        sizes.push(total_length);
+        total += total_length;
+    }
+    println!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
+    sizes.sort_by(|a, b| b.cmp(a));
+    println!("{:?}", sizes);
+    println!("total length of phased region for chrom {} is {} vs chrom length of {}", data.chrom, total, data.chrom_length);
+    let mut so_far = 0;
+    for size in sizes {
+        so_far += size;
+        if so_far > total/2 {
+            println!("After hic phasing the N50 phase blocks for chrom {} is {}", data.chrom, size);
+            break;
+        }
+    }
+    
+
 
 }
 
@@ -664,6 +696,28 @@ fn get_posterior(marriage_log_likelihoods: &HashMap<usize,f64>) -> (usize, f32) 
 }
 
 
+fn get_posterior(marriage_log_likelihoods: &HashMap<usize,f64>) -> (usize, f32) {
+    let mut log_likelihoods:Vec<f32> = Vec::new();
+    let mut posteriors: Vec<f32> = Vec::new();
+    for i in 0..marriage_log_likelihoods.len() {
+        log_likelihoods.push(0.0);
+        posteriors.push(0.0);
+    }
+    for (pairing_index, log_likelihood) in marriage_log_likelihoods.iter() {
+        log_likelihoods[*pairing_index] = *log_likelihood as f32;
+    }
+    let log_denominator = log_sum_exp(&log_likelihoods);
+    let mut max = 0.0;
+    let mut max_index = 0;
+    for i in 0..marriage_log_likelihoods.len() {
+        posteriors[i] = (log_likelihoods[i] - log_denominator).exp();
+        if posteriors[i] >= max {
+            max = posteriors[i];
+            max_index = i;
+        }
+    }
+    (max_index, max)
+}
 
 fn do_something(counts: &HashMap<(u8,u8),usize>, ploidy: usize) {
     let all_possible_pairings = pairings(ploidy); // get all pairings
