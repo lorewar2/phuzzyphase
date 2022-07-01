@@ -198,12 +198,15 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 }
                 
                 let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
-                phase_blocks.push(PhaseBlock {
-                    start_index: phase_block_start,
-                    start_position: vcf_info.variant_positions[phase_block_start],
-                    end_index: last_attempted_index,
-                    end_position: vcf_info.variant_positions[last_attempted_index],
-                });
+                for phase_block in cut_blocks {
+                    phase_blocks.push(phase_block);
+                }
+                //phase_blocks.push(PhaseBlock {
+                //    start_index: phase_block_start,
+                //    start_position: vcf_info.variant_positions[phase_block_start],
+                //    end_index: last_attempted_index,
+                //    end_position: vcf_info.variant_positions[last_attempted_index],
+                //});
                 println!(
                     "PHASE BLOCK ENDING {}-{}, {}-{} length {}",
                     phase_block_start,
@@ -296,12 +299,15 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     }
 
     let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
-    phase_blocks.push(PhaseBlock {
-        start_index: phase_block_start,
-        start_position: vcf_info.variant_positions[phase_block_start],
-        end_index: last_attempted_index,
-        end_position: vcf_info.variant_positions[last_attempted_index],
-    });
+    for phase_block in cut_blocks {
+        phase_blocks.push(phase_block);
+    }
+    //phase_blocks.push(PhaseBlock {
+    //    start_index: phase_block_start,
+    //    start_position: vcf_info.variant_positions[phase_block_start],
+    //    end_index: last_attempted_index,
+    //    end_position: vcf_info.variant_positions[last_attempted_index],
+    //});
 
     println!("DONE!");
     let mut total_gap_length = 0;
@@ -355,6 +361,8 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
         .header()
         .name2rid(data.chrom.as_bytes())
         .expect("can't get chrom rid, make sure vcf and bam and fasta contigs match!");
+    let mut phase_block_start = start_index;
+
 
     for breakpoint in start_index..end_index {
         let mut log_likelihoods: Vec<f32> = Vec::new();
@@ -374,6 +382,14 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
         let log_posterior = log_likelihoods[0] - log_bayes_denom;
         let posterior = log_posterior.exp();
         if posterior < data.long_switch_threshold {
+            // end phase block and add to to_return
+            to_return.push(PhaseBlock {
+                start_index: phase_block_start,
+                start_position: vcf_info.variant_positions[phase_block_start],
+                end_index: breakpoint,
+                end_position: vcf_info.variant_positions[breakpoint],
+            });
+            phase_block_start = breakpoint + 1;
             let start_position = vcf_info.variant_positions[start_index];
             let end_position = vcf_info.variant_positions[end_index];
             let position = vcf_info.variant_positions[breakpoint];
@@ -401,6 +417,20 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
             let (_break, posteriors, log_likelihood) = expectation(&molecules, &cluster_centers);
             eprintln!("yay we did it right??? posterior {}, molecules {} log likelihoods {:?}", posterior, molecules.len(), log_likelihoods);
         }  ***/
+    }
+    if to_return.len() == 0 {
+        to_return.push(PhaseBlock{
+            start_index: start_index,
+            start_position: vcf_info.variant_positions[start_index],
+            end_index: end_index,
+            end_position: vcf_info.variant_positions[end_index]});
+    } else if to_return[to_return.len()-1].end_index != end_index {
+        to_return.push(PhaseBlock {
+            start_index: phase_block_start,
+            start_position: vcf_info.variant_positions[phase_block_start],
+            end_index: end_index,
+            end_position: vcf_info.variant_positions[end_index],
+        });
     }
     to_return
 }
