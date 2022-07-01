@@ -15,3 +15,4 @@ rust-htslib = ">=0.36"
 flate2 = { version = "1.0", features = ["rust_backend"], default-features = false }
 failure = "0.1.5"
 statrs = "*"
+petgraph = "*"

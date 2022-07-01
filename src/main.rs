@@ -5,6 +5,7 @@ extern crate hashbrown;
 extern crate rand;
 extern crate rayon;
 extern crate statrs;
+extern crate petgraph;
 
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -17,6 +18,7 @@ use statrs::distribution::Discrete;
 use bio::alignment::pairwise::banded;
 use bio::io::fasta;
 use bio::utils::TextSlice;
+use petgraph::unionfind::UnionFind;
 
 use statrs::distribution::Multinomial;
 
@@ -116,6 +118,8 @@ fn _main() -> Result<(), Error> {
             phasing_window: params.phasing_window,
             seed: params.seed,
             ploidy: params.ploidy,
+            hic_phasing_posterior_threshold: params.hic_phasing_posterior_threshold,
+            long_switch_threshold: params.long_switch_threshold,
         };
         chunks.push(data);
     }
@@ -182,12 +186,12 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         let mut max_index: usize = 0;
 
         while cluster_center_delta > 0.01 {
-            let (breaking_point, posteriors) = expectation(&molecules, &cluster_centers);
+            let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers);
             if in_phaseblock && breaking_point {
-                println!(
-                    "BREAKING due to no posteriors differing... window {}-{}",
-                    window_start, window_end
-                );
+                //println!(
+                //    "BREAKING due to no posteriors differing... window {}-{}",
+                //    window_start, window_end
+                //);
                 in_phaseblock = false;
                 while cluster_centers[0][last_attempted_index] == 0.5 {
                     last_attempted_index -= 1;
@@ -199,15 +203,16 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     end_position: vcf_info.variant_positions[last_attempted_index],
                 });
                 println!(
-                    "PHASE BLOCK ENDING {}-{}, {}-{}",
+                    "PHASE BLOCK ENDING {}-{}, {}-{} length {}",
                     phase_block_start,
                     last_attempted_index,
                     vcf_info.variant_positions[phase_block_start],
-                    vcf_info.variant_positions[last_attempted_index]
+                    vcf_info.variant_positions[last_attempted_index],
+                    vcf_info.variant_positions[last_attempted_index] - vcf_info.variant_positions[phase_block_start]
                 );
                 phase_block_start = last_attempted_index + 1;
                 window_start = vcf_info.variant_positions[phase_block_start];
-                eprintln!("reseting window start to {}", window_start);
+                //eprintln!("reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
                 let seed = [data.seed; 32];
                 let mut rng: StdRng = SeedableRng::from_seed(seed);
@@ -227,15 +232,15 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                             break;
                         }
                     }
-                    eprintln!("unable to start phaseblock, resetting");
+                    //eprintln!("unable to start phaseblock, resetting");
                 } else {
-                    eprintln!("unphased variants {}-{} positions {}-{}", first_var_index, last_var_index,
-                    vcf_info.variant_positions[first_var_index], vcf_info.variant_positions[last_var_index]);
+                    //eprintln!("unphased variants {}-{} positions {}-{}", first_var_index, last_var_index,
+                    //vcf_info.variant_positions[first_var_index], vcf_info.variant_positions[last_var_index]);
                     phase_block_start = last_var_index + 1;
                 }
                 
                 window_start = vcf_info.variant_positions[phase_block_start];
-                eprintln!("reseting window start to {}", window_start);
+                //eprintln!("reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
                 let seed = [data.seed; 32];
                 let mut rng: StdRng = SeedableRng::from_seed(seed);
@@ -287,6 +292,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         window_end = window_end.min(vcf_info.final_position as usize);
         //break;
     }
+    let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
 
     phase_blocks.push(PhaseBlock {
         start_index: phase_block_start,
@@ -296,20 +302,93 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     });
 
     println!("DONE!");
+    let mut total_gap_length = 0;
     for (id, phase_block) in phase_blocks.iter().enumerate() {
+        let mut gap = phase_block.start_position;
+        if id > 0 {
+            gap = phase_block.start_position - phase_blocks[id - 1].end_position;
+        }
+        total_gap_length += gap;
         println!(
-            "phase block {} from {}-{}, {}-{}",
+            "phase block {} from {}-{}, {}-{} length {} with gap from last of {}",
             id,
             phase_block.start_position,
             phase_block.end_position,
             phase_block.start_index,
-            phase_block.end_index
+            phase_block.end_index,
+            phase_block.end_position - phase_block.start_position,
+            gap
         );
     }
+    println!("and final gap of {}", (data.chrom_length as usize) - phase_blocks[phase_blocks.len() - 1].end_position);
+    println!("with total gap length of {}", total_gap_length);
+    // get phaseblock N50... 
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut total: usize = 0;
+    for phase_block in phase_blocks.iter() {
+        let length = phase_block.end_position - phase_block.start_position;
+        sizes.push(length);
+        total += length;
+    }
+    sizes.sort_by(|a, b| b.cmp(a));
+    let mut so_far = 0;
+    for size in sizes {
+        so_far += size;
+        if so_far > total/2 {
+            println!("N50 phase blocks from long reads for chrom {} is {}", data.chrom, size);
+            break;
+        }
+    }
+
     let new_phase_blocks = phase_phaseblocks(data, &mut cluster_centers, &phase_blocks);
     output_phased_vcf(data, cluster_centers, phase_blocks);
     Ok(())
 }
+
+fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut Vec<Vec<f32>>, vcf_info: &VCF_info, vcf_reader: &mut bcf::IndexedReader, data: &ThreadData) -> Vec<PhaseBlock> {
+    let mut to_return: Vec<PhaseBlock> = Vec::new();
+    let pairings = pairings(data.ploidy);
+    let log_prior = (1.0/(pairings.len() as f32)).ln();
+    let chrom = vcf_reader
+        .header()
+        .name2rid(data.chrom.as_bytes())
+        .expect("can't get chrom rid, make sure vcf and bam and fasta contigs match!");
+
+    for breakpoint in start_index..end_index {
+        let mut log_likelihoods: Vec<f32> = Vec::new();
+        for pairing in pairings.iter() {
+            swap(cluster_centers, breakpoint, &pairing, 50);
+            let position = vcf_info.variant_positions[breakpoint];
+            vcf_reader
+                .fetch(chrom, position as u64, None)
+                .expect("could not fetch in vcf");
+            let (molecules, first_var_index, last_var_index) = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
+            let (_break, _posteriors, log_likelihood) = expectation(&molecules, &cluster_centers);
+            log_likelihoods.push(log_likelihood + log_prior);
+            swap(cluster_centers, breakpoint, &pairing, 50); // reversing the swap
+        }
+        let log_bayes_denom = log_sum_exp(&log_likelihoods);
+        let log_posterior = log_likelihoods[0] - log_bayes_denom;
+        let posterior = log_posterior.exp();
+        if posterior < data.long_switch_threshold {
+            eprintln!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, posterior {}, breakpoint {}", start_index, end_index, posterior, breakpoint);
+        }
+    }
+    to_return
+}
+
+fn swap(cluster_centers: &mut Vec<Vec<f32>>, breakpoint: usize, pairing: &Vec<(usize, usize)>, length: usize) {
+    for (hap1, hap2) in pairing {
+        for locus in (breakpoint+1)..(breakpoint+1+length) {
+            if locus < cluster_centers[0].len() {
+                let tmp = cluster_centers[*hap1][locus];
+                cluster_centers[*hap1][locus] = cluster_centers[*hap2][locus];
+                cluster_centers[*hap2][locus] = tmp;
+            }
+        }
+    }
+}
+
 
 fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, phase_blocks: &Vec<PhaseBlock>) {
     let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
@@ -403,7 +482,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     // okay now i have allele_pair_counts which will contribute log likelihoods to phaseblock pairs
     let all_possible_pairings = pairings(data.ploidy); // get all pairings
     let log_phasing_prior = (1.0/(all_possible_pairings.len() as f64)).ln();
-    let error = 0.05; // TODO do not hard code
+    let error = 0.2; // TODO do not hard code
     // each pairing implies a multinomial distribution on each pair of alleles
     for ((allele1_index, allele2_index), counts) in allele_pair_counts.iter() {
         let mut total_counts: u64 = 0;
@@ -442,7 +521,9 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             //eprintln!("\t\t\tlikelihood update {}, in log {}, total log {}",multinomial_distribution.pmf(counts), multinomial_distribution.ln_pmf(counts), log_likelihood);
         }
     }
-
+    
+    
+    let mut union_find: UnionFind<usize> = UnionFind::new(phase_blocks.len());
     // now for each phase block pair, we will normalize the pairing marginal log likelihoods to sum to 1 giving us
     // posterior probabilities for each marriage
     for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
@@ -466,24 +547,123 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             }
         }
         eprintln!("after normalizing, phase blocks {} and {} with pairing {} and posterior {}", phase_block1, phase_block2, max_index, max);
+        if max > data.hic_phasing_posterior_threshold {
+            union_find.union(*phase_block1, *phase_block2);
+        }
     }
 
+    let mut problem_phaseblocks: HashMap<usize, usize> = HashMap::new();// map from phase block to the number of triangles it ruins
+    for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
+        for ((phase_block3, phase_block4), marriage_log_likelihoods2) in phase_block_pair_phasing_log_likelihoods.iter() {
+            
+            if phase_block1 == phase_block3 {
+                if union_find.equiv(*phase_block1, *phase_block2) && 
+                    union_find.equiv(*phase_block2, *phase_block3) && 
+                    union_find.equiv(*phase_block3, *phase_block4) {
+                    let (edge1, post) = get_posterior(marriage_log_likelihoods);
+                    let (edge2, post2) = get_posterior(marriage_log_likelihoods2);
+                    let min = phase_block2.min(phase_block4);
+                    let max = phase_block2.max(phase_block4);
+                    match phase_block_pair_phasing_log_likelihoods.get(&(*min, *max)) {
+                        Some(marriage_log_likelihoods3) => {
+                            let (edge3, post3) = get_posterior(marriage_log_likelihoods3);
+                            let mut problem = false;
+                            if edge1 == 0 && edge2 == 0 && edge3 == 1 {
+                                eprintln!("yeah we have a problem");
+                                problem = true;
+                            } else if edge1 == 0 && edge2 == 1 && edge3 == 0 {
+                                eprintln!("yeah we have a problem2");
+                                problem = true;
+                            } else if edge1 == 1 && edge2 == 0 && edge3 == 0 {
+                                problem = true;
+                                eprintln!("yeah we have a problem3");
+                            } else if edge1 == 1 && edge2 == 1 && edge3 == 1 {
+                                eprintln!("yeah we have a problem4");
+                                problem = true;
+                            } else {
+                                eprintln!("triangle {} - {} - {} consistent", edge1, edge2, edge3);
+                            }
+                            if problem {
+                                let count = problem_phaseblocks.entry(*phase_block1).or_insert(0);
+                                *count += 1;
+                                let count = problem_phaseblocks.entry(*phase_block2).or_insert(0);
+                                *count += 1;
+                                let count = problem_phaseblocks.entry(*phase_block4).or_insert(0);
+                                *count += 1;
+                            }
+                        },
+                        None => (),
+                    }
+                }
+            }
+        }
+    }
+    let mut count_vec: Vec<(&usize, &usize)> = problem_phaseblocks.iter().collect();
+    count_vec.sort_by(|a, b| b.1.cmp(a.1));
 
-    /*
-    let mut all_phase_block_alleles: HashMap<usize, HashMap<String, Allele>> = HashMap::new();
 
-    let phase_block1 = 0;
-    let phase_block2 = 1; //TODODODOD go back and make code to reduce to 2
-    let empty: HashMap<(u8, u8), usize> = HashMap::new();
-    let counts = match all_counts.get(&(phase_block1, phase_block2)) {
-        Some(x) => x,
-        None => &empty,
-    };
-    do_something(&counts, data.ploidy);
-    */
+    println!("problem phaseblocks ruining triangles {:?}", count_vec);
+
+
+    let labeling = union_find.into_labeling();
+    let mut new_phaseblocks: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (phase_block_id, label) in labeling.iter().enumerate() {
+        let new_phaseblock = new_phaseblocks.entry(*label).or_insert(Vec::new());
+        new_phaseblock.push(phase_block_id);
+    }
+    // get phaseblock N50... 
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut total: usize = 0;
+    for (new_id, old_phase_block_ids) in new_phaseblocks.iter() {
+        let mut total_length = 0;
+        for old_block_id in old_phase_block_ids {
+            let length = phase_blocks[*old_block_id].end_position - phase_blocks[*old_block_id].start_position;
+            total_length += length;
+        }
+        sizes.push(total_length);
+        total += total_length;
+    }
+    println!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
+    sizes.sort_by(|a, b| b.cmp(a));
+    println!("{:?}", sizes);
+    println!("total length of phased region for chrom {} is {} vs chrom length of {}", data.chrom, total, data.chrom_length);
+    let mut so_far = 0;
+    for size in sizes {
+        so_far += size;
+        if so_far > total/2 {
+            println!("After hic phasing the N50 phase blocks for chrom {} is {}", data.chrom, size);
+            break;
+        }
+    }
+    
 
 
 }
+
+fn get_posterior(marriage_log_likelihoods: &HashMap<usize,f64>) -> (usize, f32) {
+    let mut log_likelihoods:Vec<f32> = Vec::new();
+    let mut posteriors: Vec<f32> = Vec::new();
+    for i in 0..marriage_log_likelihoods.len() {
+        log_likelihoods.push(0.0);
+        posteriors.push(0.0);
+    }
+    for (pairing_index, log_likelihood) in marriage_log_likelihoods.iter() {
+        log_likelihoods[*pairing_index] = *log_likelihood as f32;
+    }
+    let log_denominator = log_sum_exp(&log_likelihoods);
+    let mut max = 0.0;
+    let mut max_index = 0;
+    for i in 0..marriage_log_likelihoods.len() {
+        posteriors[i] = (log_likelihoods[i] - log_denominator).exp();
+        if posteriors[i] >= max {
+            max = posteriors[i];
+            max_index = i;
+        }
+    }
+    (max_index, max)
+}
+
+
 
 fn do_something(counts: &HashMap<(u8,u8),usize>, ploidy: usize) {
     let all_possible_pairings = pairings(ploidy); // get all pairings
@@ -649,6 +829,7 @@ fn pairings(size: usize) -> Vec<Vec<(usize, usize)>> {
     return generate_pairings(pairings_so_far, left, right);
 }
 
+
 // generates all bipartite graph pairings
 fn generate_pairings(pairings_so_far: Vec<(usize, usize)>, left_remaining: Vec<usize>, right_remaining: Vec<usize>) -> Vec<Vec<(usize, usize)>> {
     assert!(left_remaining.len() == right_remaining.len());
@@ -806,9 +987,10 @@ fn maximization(
 fn expectation(
     molecules: &Vec<Vec<Allele>>,
     cluster_centers: &Vec<Vec<f32>>,
-) -> (bool, Vec<Vec<f32>>) {
+) -> (bool, Vec<Vec<f32>>, f32) {
     let mut posteriors: Vec<Vec<f32>> = Vec::new();
     let mut any_different = false;
+    let mut log_likelihood: f32 = 0.0;
     for molecule in molecules.iter() {
         let mut log_probs: Vec<f32> = Vec::new(); // for each haplotype
         for haplotype in 0..cluster_centers.len() {
@@ -821,9 +1003,11 @@ fn expectation(
                     log_prob += (1.0 - cluster_centers[haplotype][allele.index]).ln();
                 }
             }
+            
             log_probs.push(log_prob);
         }
         let bayes_log_denom = log_sum_exp(&log_probs);
+        log_likelihood += bayes_log_denom;
         let mut mol_posteriors: Vec<f32> = Vec::new();
 
         for log_prob in log_probs {
@@ -838,7 +1022,7 @@ fn expectation(
 
         posteriors.push(mol_posteriors);
     }
-    (!any_different, posteriors)
+    (!any_different, posteriors, log_likelihood)
 }
 
 fn log_sum_exp(p: &Vec<f32>) -> f32 {
@@ -890,7 +1074,7 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
                     }
                 }
             }
-            Err(_) => println!("no ref tag for this variant"),
+            Err(_) => (),
         }
         match rec.format(alt_tag).string() {
             Ok(rec_format) => {
@@ -905,7 +1089,7 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
                     }
                 }
             }
-            Err(_) => println!("no alt tag for this variant"),
+            Err(_) => (),
         }
     }
     let mut to_return: Vec<Vec<Allele>> = Vec::new();
@@ -1403,6 +1587,8 @@ struct ThreadData {
     phasing_window: usize,
     seed: u8,
     ploidy: usize,
+    hic_phasing_posterior_threshold: f32,
+    long_switch_threshold: f32,
 }
 
 #[derive(Clone)]
@@ -1419,6 +1605,8 @@ struct Params {
     min_base_qual: u8,
     window: usize,
     phasing_window: usize,
+    hic_phasing_posterior_threshold: f32,
+    long_switch_threshold: f32,
 }
 
 fn load_params() -> Params {
@@ -1447,6 +1635,10 @@ fn load_params() -> Params {
     let min_base_qual = params.value_of("min_base_qual").unwrap();
     let min_base_qual = min_base_qual.to_string().parse::<u8>().unwrap();
 
+    let hic_phasing_posterior_threshold = params.value_of("hic_phasing_posterior_threshold").unwrap();
+    let hic_phasing_posterior_threshold = hic_phasing_posterior_threshold.to_string().parse::<f32>().unwrap();
+
+
     let fasta = params.value_of("fasta").unwrap();
 
     let ploidy = params.value_of("ploidy").unwrap();
@@ -1461,6 +1653,9 @@ fn load_params() -> Params {
 
     let phasing_window = params.value_of("phasing_window").unwrap();
     let phasing_window = phasing_window.to_string().parse::<usize>().unwrap();
+
+    let long_switch_threshold = params.value_of("long_switch_threshold").unwrap();
+    let long_switch_threshold = long_switch_threshold.to_string().parse::<f32>().unwrap();
 
     let vcf = params.value_of("vcf").unwrap();
 
@@ -1477,5 +1672,7 @@ fn load_params() -> Params {
         min_base_qual: min_base_qual,
         window: allele_alignment_window,
         phasing_window: phasing_window,
+        hic_phasing_posterior_threshold: hic_phasing_posterior_threshold,
+        long_switch_threshold: long_switch_threshold,
     }
 }

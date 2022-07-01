@@ -77,3 +77,15 @@ args:
         takes_value: true
         default_value: "20000"
         help: base window for phasing solution in sliding window (default 20kb)
+    - hic_phasing_posterior_threshold:
+        long: hic_phasing_posterior_threshold
+        required: false
+        takes_value: true
+        default_value: "0.9999"
+        help: confidence threshold to merge phase blocks via hic 
+    - long_switch_threshold:
+        long: long_switch_threshold
+        required: false
+        takes_value: true
+        default_value: "0.9999"
+        help: confidence threshold when testing potential break points for long switches
