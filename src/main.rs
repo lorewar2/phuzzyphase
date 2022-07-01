@@ -371,7 +371,17 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
         let log_posterior = log_likelihoods[0] - log_bayes_denom;
         let posterior = log_posterior.exp();
         if posterior < data.long_switch_threshold {
-            eprintln!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, posterior {}, breakpoint {}", start_index, end_index, posterior, breakpoint);
+            let start_position = vcf_info.variant_positions[start_index];
+            let end_position = vcf_info.variant_positions[end_index];
+            let position = vcf_info.variant_positions[breakpoint];
+            vcf_reader
+                .fetch(chrom, position as u64, None)
+                .expect("could not fetch in vcf");
+                let (molecules, first_var_index, last_var_index)  = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
+            eprintln!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, positions {}-{}, posterior {}, breakpoint {} position {} with {} molecules", 
+                start_index, end_index, start_position, end_position, posterior, breakpoint, position, molecules.len());
+            
+        
         }
     }
     to_return
