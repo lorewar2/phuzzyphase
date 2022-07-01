@@ -358,13 +358,14 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
 
     for breakpoint in start_index..end_index {
         let mut log_likelihoods: Vec<f32> = Vec::new();
+        let position = vcf_info.variant_positions[breakpoint];
+        vcf_reader
+            .fetch(chrom, (position as u64).checked_sub(15000).unwrap_or(0), Some(position as u64 + 15000)) // TODO dont hard code things
+            .expect("could not fetch in vcf");
+        let (molecules, first_var_index, last_var_index) = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
         for pairing in pairings.iter() {
             swap(cluster_centers, breakpoint, &pairing, 50);
-            let position = vcf_info.variant_positions[breakpoint];
-            vcf_reader
-                .fetch(chrom, (position as u64).checked_sub(15000).unwrap_or(0), Some(position as u64 + 15000)) // TODO dont hard code things
-                .expect("could not fetch in vcf");
-            let (molecules, first_var_index, last_var_index) = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
+            
             let (_break, _posteriors, log_likelihood) = expectation(&molecules, &cluster_centers);
             log_likelihoods.push(log_likelihood + log_prior);
             swap(cluster_centers, breakpoint, &pairing, 50); // reversing the swap
@@ -405,11 +406,11 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
 }
 
 fn swap(cluster_centers: &mut Vec<Vec<f32>>, breakpoint: usize, pairing: &Vec<(usize, usize)>, length: usize) {
-    let mut touched: HashSet<usize> = HashSet::new();
+    let mut touched = [false;32];
     for (hap1, hap2) in pairing {
-        if touched.contains(hap1) { continue; }
-        touched.insert(*hap1);
-        touched.insert(*hap2);
+        if touched[*hap1]  { continue; }
+        touched[*hap1] = true;
+        touched[*hap2] = true;
         for locus in (breakpoint+1)..(breakpoint+1+length) {
             if locus < cluster_centers[0].len() {
                 let tmp = cluster_centers[*hap1][locus];
