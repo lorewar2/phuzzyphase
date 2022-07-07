@@ -956,7 +956,7 @@ fn output_phased_vcf(
         let mut rec = r.expect("could not unwrap vcf record");
         //println!("{}",index);
         match index_to_phase_block.get(&index) {
-            Some(id) => rec.push_info_integer(b"PS", &[*id as i32]).expect("you did it again, pushing your problems down to future you"),
+            Some(id) => rec.push_format_integer(b"PS", &[*id as i32]).expect("you did it again, pushing your problems down to future you"),
             None => (),
         }
         //let phase_block_id = index_to_phase_block.get(&index).expect("i had it coming");
