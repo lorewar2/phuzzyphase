@@ -935,9 +935,12 @@ fn output_phased_vcf(
 ) {
     let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
+    let header_view = vcf_reader.header();
+    let mut new_header = bcf::header::Header::from_template(header_view);
+    new_header.push_record(br#"##FORMAT=<ID=PS,Number=1,Type=String,Description="phase set id">"#);
     let mut vcf_writer = bcf::Writer::from_path(
         format!("{}/phased_chrom_{}.vcf.gz", data.output, data.chrom),
-        &bcf::header::Header::from_template(vcf_reader.header()),
+        &new_header,
         false,
         Format::Vcf,
     )
@@ -949,9 +952,6 @@ fn output_phased_vcf(
             index_to_phase_block.insert(i, id);
         }
     }
-    let header_view = vcf_reader.header();
-    let mut new_header = bcf::header::Header::from_template(header_view);
-    new_header.push_record(br#"##FORMAT=<ID=PS,Number=1,Type=String,Description="phase set id">"#);
     for r in vcf_reader.records() {
         let mut rec = r.expect("could not unwrap vcf record");
         //println!("{}",index);
