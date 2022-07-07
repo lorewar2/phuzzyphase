@@ -952,7 +952,11 @@ fn output_phased_vcf(
     for r in vcf_reader.records() {
         let mut rec = r.expect("could not unwrap vcf record");
         //println!("{}",index);
-        let phase_block_id = index_to_phase_block.get(&index).expect("i had it coming");
+        match index_to_phase_block.get(&index) {
+            Some(id) => rec.push_info_integer(b"PS", &[*id as i32]).expect("you did it again, pushing your problems down to future you"),
+            None => (),
+        }
+        //let phase_block_id = index_to_phase_block.get(&index).expect("i had it coming");
         let genotypes = infer_genotype(&cluster_centers, index);
         rec.push_genotypes(&genotypes)
             .expect("i did expect this error");
