@@ -113,8 +113,8 @@ fn _main() -> Result<(), Error> {
             chrom_length: chrom_lengths[i],
             window: params.window,
             output: params.output.to_string(),
-            vcf_out: format!("{}/chrom_{}.bcf", params.output, chrom),
-            vcf_out_done: format!("{}/chrom_{}.bcf.done", params.output, chrom),
+            vcf_out: format!("{}/chrom_{}.vcf.gz", params.output, chrom),
+            vcf_out_done: format!("{}/chrom_{}.vcf.done", params.output, chrom),
             phasing_window: params.phasing_window,
             seed: params.seed,
             ploidy: params.ploidy,
@@ -936,10 +936,10 @@ fn output_phased_vcf(
     let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
     let mut vcf_writer = bcf::Writer::from_path(
-        format!("{}/phased_chrom_{}.bcf", data.output, data.chrom),
+        format!("{}/phased_chrom_{}.vcf.gz", data.output, data.chrom),
         &bcf::header::Header::from_template(vcf_reader.header()),
         false,
-        Format::Bcf,
+        Format::Vcf,
     )
     .expect("could not open vcf writer");
     let mut index: usize = 0;
@@ -949,6 +949,9 @@ fn output_phased_vcf(
             index_to_phase_block.insert(i, id);
         }
     }
+    let header_view = vcf_reader.header();
+    let mut new_header = bcf::header::Header::from_template(header_view);
+    new_header.push_record(br#"##FORMAT=<ID=PS,Number=1,Type=String,Description="phase set id">"#);
     for r in vcf_reader.records() {
         let mut rec = r.expect("could not unwrap vcf record");
         //println!("{}",index);
@@ -1246,7 +1249,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
     {
         // creating my own scope to close later to close vcf writer
         let mut vcf_writer =
-            bcf::Writer::from_path(data.vcf_out.to_string(), &new_header, false, Format::Bcf)?;
+            bcf::Writer::from_path(data.vcf_out.to_string(), &new_header, false, Format::Vcf)?;
         let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
         vcf_reader.fetch(chrom, 0, None)?; // skip to chromosome for this thread
         let mut total = 0;
