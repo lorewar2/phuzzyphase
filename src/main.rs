@@ -957,7 +957,7 @@ fn output_phased_vcf(
     let mut new_header = bcf::header::Header::from_template(header_view);
     new_header.push_record(br#"##FORMAT=<ID=PS,Number=1,Type=Integer,Description="phase set id">"#);
     let mut vcf_writer = bcf::Writer::from_path(
-        format!("{}/phased_chrom_{}.vcf.gz", data.output, data.chrom),
+        format!("{}/phased_chrom_{}.vcf.gz", data.output, sanitize_filename::sanitize(&data.chrom)),
         &new_header,
         false,
         Format::Vcf,
