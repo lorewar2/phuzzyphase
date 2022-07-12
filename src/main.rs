@@ -1234,8 +1234,10 @@ fn init_cluster_centers(num: usize, data: &ThreadData) -> Vec<Vec<f32>> {
         for v in 0..num {
             cluster_center.push(0.5);
         }
-        cluster_center[0] = rng.gen::<f32>().min(0.98).max(0.02);
-        cluster_centers.push(cluster_center);
+        if cluster_center.len() > 0 {
+            cluster_center[0] = rng.gen::<f32>().min(0.98).max(0.02);
+            cluster_centers.push(cluster_center);
+        }
     }
     cluster_centers
 }
