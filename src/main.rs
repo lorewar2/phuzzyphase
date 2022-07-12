@@ -355,6 +355,17 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
 
 fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut Vec<Vec<f32>>, vcf_info: &VCF_info, vcf_reader: &mut bcf::IndexedReader, data: &ThreadData) -> Vec<PhaseBlock> {
     let mut to_return: Vec<PhaseBlock> = Vec::new();
+    to_return.push(PhaseBlock{
+        start_index: start_index,
+        start_position: vcf_info.variant_positions[start_index],
+        end_index: end_index,
+        end_position: vcf_info.variant_positions[end_index],
+    });
+    return to_return; /// TODODODODODOD short circuiting for debug only
+
+
+
+
     let pairings = pairings(data.ploidy);
     let log_prior = (1.0/(pairings.len() as f32)).ln();
     let chrom = vcf_reader
@@ -954,16 +965,18 @@ fn output_phased_vcf(
     }
     for r in vcf_reader.records() {
         let mut rec = r.expect("could not unwrap vcf record");
+        let mut new_rec = vcf_writer.empty_record();
+        copy_vcf_record(&mut new_rec, &rec);
         //println!("{}",index);
         match index_to_phase_block.get(&index) {
-            Some(id) => rec.push_format_integer(b"PS", &[*id as i32]).expect("you did it again, pushing your problems down to future you"),
+            Some(id) => new_rec.push_format_integer(b"PS", &[*id as i32]).expect("you did it again, pushing your problems down to future you"),
             None => (),
         }
         //let phase_block_id = index_to_phase_block.get(&index).expect("i had it coming");
         let genotypes = infer_genotype(&cluster_centers, index);
-        rec.push_genotypes(&genotypes)
+        new_rec.push_genotypes(&genotypes)
             .expect("i did expect this error");
-        vcf_writer.write(&rec).expect("could not write record");
+        vcf_writer.write(&new_rec).expect("could not write record");
         index += 1;
     }
 }
