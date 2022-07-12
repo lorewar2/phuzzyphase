@@ -147,7 +147,8 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     println!("thread {} chrom {}", data.index, data.chrom);
 
     if !Path::new(&data.vcf_out_done).exists() {
-        get_all_variant_assignments(data);
+        println!("yeah, we are getting all variant assignments in thread {} chrom {}", data.index, data.chrom);
+        get_all_variant_assignments(data).expect("we error here at get all variant assignments");
     }
 
     let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
@@ -1262,14 +1263,14 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
     {
         // creating my own scope to close later to close vcf writer
         let mut vcf_writer =
-            bcf::Writer::from_path(data.vcf_out.to_string(), &new_header, false, Format::Vcf)?;
+            bcf::Writer::from_path(data.vcf_out.to_string(), &new_header, false, Format::Vcf).expect("cant open vcf writer");
         let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes()).expect("could not read vcf header");
-        vcf_reader.fetch(chrom, 0, None)?; // skip to chromosome for this thread
+        vcf_reader.fetch(chrom, 0, None).expect("could not fetch chrom"); // skip to chromosome for this thread
         let mut total = 0;
         let mut hets = 0;
         for (i, _rec) in vcf_reader.records().enumerate() {
             total += 1;
-            let rec = _rec?;
+            let rec = _rec.expect("cant unwrap vcf record");
             let pos = rec.pos();
             let alleles = rec.alleles();
             let mut new_rec = vcf_writer.empty_record();
