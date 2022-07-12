@@ -146,7 +146,7 @@ struct PhaseBlock {
 }
 
 fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
-    println!("thread {} chrom {}", data.index, data.chrom);
+    println!("thread {} chrom {}end", data.index, data.chrom);
 
     if !Path::new(&data.vcf_out_done).exists() {
         //println!("yeah, we are getting all variant assignments in thread {} chrom {}", data.index, data.chrom);
