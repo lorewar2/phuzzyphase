@@ -355,14 +355,14 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
 
 fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut Vec<Vec<f32>>, vcf_info: &VCF_info, vcf_reader: &mut bcf::IndexedReader, data: &ThreadData) -> Vec<PhaseBlock> {
     let mut to_return: Vec<PhaseBlock> = Vec::new();
-    to_return.push(PhaseBlock{
+    /*to_return.push(PhaseBlock{
         start_index: start_index,
         start_position: vcf_info.variant_positions[start_index],
         end_index: end_index,
         end_position: vcf_info.variant_positions[end_index],
     });
     return to_return; /// TODODODODODOD short circuiting for debug only
-
+    */
 
 
 
