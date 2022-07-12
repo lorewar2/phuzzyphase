@@ -431,11 +431,13 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
         }  ***/
     }
     if to_return.len() == 0 {
-        to_return.push(PhaseBlock{
-            start_index: start_index,
-            start_position: vcf_info.variant_positions[start_index],
-            end_index: end_index,
-            end_position: vcf_info.variant_positions[end_index]});
+        if vcf_info.variant_positions.len() > 0 {
+            to_return.push(PhaseBlock{
+                start_index: start_index,
+                start_position: vcf_info.variant_positions[start_index],
+                end_index: end_index,
+                end_position: vcf_info.variant_positions[end_index]});
+        }
     } else if to_return[to_return.len()-1].end_index != end_index {
         to_return.push(PhaseBlock {
             start_index: phase_block_start,
