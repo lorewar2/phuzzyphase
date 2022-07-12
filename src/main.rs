@@ -96,6 +96,7 @@ fn _main() -> Result<(), Error> {
     //let vcf_reader = bcf::IndexedReader::from_path(params.vcf.to_string())?;
     let mut chunks: Vec<ThreadData> = Vec::new();
     for (i, chrom) in chroms.iter().enumerate() {
+        println!("chrom {}end",chrom);
         let data = ThreadData {
             index: i,
             long_read_bam: match &params.long_read_bam {
