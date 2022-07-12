@@ -6,6 +6,7 @@ extern crate rand;
 extern crate rayon;
 extern crate statrs;
 extern crate petgraph;
+extern crate sanitize_filename;
 
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -113,8 +114,8 @@ fn _main() -> Result<(), Error> {
             chrom_length: chrom_lengths[i],
             window: params.window,
             output: params.output.to_string(),
-            vcf_out: format!("{}/chrom_{}.vcf.gz", params.output, chrom),
-            vcf_out_done: format!("{}/chrom_{}.vcf.done", params.output, chrom),
+            vcf_out: format!("{}/chrom_{}.vcf.gz", params.output, sanitize_filename::sanitize(chrom)),
+            vcf_out_done: format!("{}/chrom_{}.vcf.done", params.output, sanitize_filename::sanitize(chrom)),
             phasing_window: params.phasing_window,
             seed: params.seed,
             ploidy: params.ploidy,
