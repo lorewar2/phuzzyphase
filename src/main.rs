@@ -1241,16 +1241,16 @@ fn init_cluster_centers(num: usize, data: &ThreadData) -> Vec<Vec<f32>> {
 
 fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
     let mut long_read_bam_reader = match &data.long_read_bam {
-        Some(x) => Some(bam::IndexedReader::from_path(x)?),
+        Some(x) => Some(bam::IndexedReader::from_path(x).expect("could not open bam, maybe no index?")),
         None => None,
     };
     let mut hic_bam_reader = match &data.hic_bam {
-        Some(x) => Some(bam::IndexedReader::from_path(x)?),
+        Some(x) => Some(bam::IndexedReader::from_path(x).expect("could not open bam, maybe no index2?")),
         None => None,
     };
     let mut fasta = fasta::IndexedReader::from_file(&data.fasta).expect("cannot open fasta file");
 
-    let mut vcf_reader = bcf::IndexedReader::from_path(data.vcf.to_string())?;
+    let mut vcf_reader = bcf::IndexedReader::from_path(data.vcf.to_string()).expect("could not load index for vcf... looking for .csi file");
     let header_view = vcf_reader.header();
     let mut new_header = bcf::header::Header::from_template(header_view);
     new_header.push_record(br#"##fileformat=VCFv4.2"#);
@@ -1263,7 +1263,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
         // creating my own scope to close later to close vcf writer
         let mut vcf_writer =
             bcf::Writer::from_path(data.vcf_out.to_string(), &new_header, false, Format::Vcf)?;
-        let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes())?;
+        let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes()).expect("could not read vcf header");
         vcf_reader.fetch(chrom, 0, None)?; // skip to chromosome for this thread
         let mut total = 0;
         let mut hets = 0;
@@ -1277,11 +1277,11 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
             if alleles.len() > 2 {
                 continue; // ignore multi allelic sites
             }
-            let reference = std::str::from_utf8(alleles[0])?;
-            let alternative = std::str::from_utf8(alleles[1])?;
+            let reference = std::str::from_utf8(alleles[0]).expect("this really shouldnt fail");
+            let alternative = std::str::from_utf8(alleles[1]). expect("this really shouldnt fail2");
             let rec_chrom = rec.rid().expect("could not unwrap vcf record id");
 
-            let genotypes = rec.genotypes()?;
+            let genotypes = rec.genotypes().expect("cant get genotypes");
             let genotype = genotypes.get(0); // assume only 1 and get the first one
             if is_heterozygous(genotype) {
                 hets += 1;
@@ -1316,7 +1316,9 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
         .status()
         .expect("bcftools failed us");
 
-    fs::File::create(data.vcf_out_done.to_string())?;
+    
+
+    fs::File::create(data.vcf_out_done.to_string()).expect("cant create .done file. are the permissions wrong?");
     Ok(())
 }
 
