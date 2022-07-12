@@ -329,7 +329,10 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
             gap
         );
     }
-    println!("and final gap of {}", (data.chrom_length as usize) - phase_blocks[phase_blocks.len() - 1].end_position);
+    if phase_blocks.len() > 0 {
+        println!("and final gap of {}", (data.chrom_length as usize) - phase_blocks[phase_blocks.len() - 1].end_position);
+    }
+    
     println!("with total gap length of {}", total_gap_length);
     // get phaseblock N50... 
     let mut sizes: Vec<usize> = Vec::new();
