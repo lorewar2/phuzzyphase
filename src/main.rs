@@ -147,7 +147,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     println!("thread {} chrom {}", data.index, data.chrom);
 
     if !Path::new(&data.vcf_out_done).exists() {
-        println!("yeah, we are getting all variant assignments in thread {} chrom {}", data.index, data.chrom);
+        //println!("yeah, we are getting all variant assignments in thread {} chrom {}", data.index, data.chrom);
         get_all_variant_assignments(data).expect("we error here at get all variant assignments");
     }
 
@@ -1265,51 +1265,56 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
         let mut vcf_writer =
             bcf::Writer::from_path(data.vcf_out.to_string(), &new_header, false, Format::Vcf).expect("cant open vcf writer");
         let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes()).expect("could not read vcf header");
-        vcf_reader.fetch(chrom, 0, None).expect("could not fetch chrom"); // skip to chromosome for this thread
-        let mut total = 0;
-        let mut hets = 0;
-        for (i, _rec) in vcf_reader.records().enumerate() {
-            total += 1;
-            let rec = _rec.expect("cant unwrap vcf record");
-            let pos = rec.pos();
-            let alleles = rec.alleles();
-            let mut new_rec = vcf_writer.empty_record();
-            copy_vcf_record(&mut new_rec, &rec);
-            if alleles.len() > 2 {
-                continue; // ignore multi allelic sites
-            }
-            let reference = std::str::from_utf8(alleles[0]).expect("this really shouldnt fail");
-            let alternative = std::str::from_utf8(alleles[1]). expect("this really shouldnt fail2");
-            let rec_chrom = rec.rid().expect("could not unwrap vcf record id");
+        match vcf_reader.fetch(chrom, 0, None) {
+            Ok(_) => {
+                let mut total = 0;
+                let mut hets = 0;
+                for (i, _rec) in vcf_reader.records().enumerate() {
+                    total += 1;
+                    let rec = _rec.expect("cant unwrap vcf record");
+                    let pos = rec.pos();
+                    let alleles = rec.alleles();
+                    let mut new_rec = vcf_writer.empty_record();
+                    copy_vcf_record(&mut new_rec, &rec);
+                    if alleles.len() > 2 {
+                        continue; // ignore multi allelic sites
+                    }
+                    let reference = std::str::from_utf8(alleles[0]).expect("this really shouldnt fail");
+                    let alternative = std::str::from_utf8(alleles[1]). expect("this really shouldnt fail2");
+                    let rec_chrom = rec.rid().expect("could not unwrap vcf record id");
 
-            let genotypes = rec.genotypes().expect("cant get genotypes");
-            let genotype = genotypes.get(0); // assume only 1 and get the first one
-            if is_heterozygous(genotype) {
-                hets += 1;
-                get_variant_assignments(
-                    &data.chrom,
-                    pos as usize,
-                    reference.to_string(),
-                    alternative.to_string(),
-                    data.min_mapq,
-                    data.min_base_qual,
-                    &mut long_read_bam_reader,
-                    &mut hic_bam_reader,
-                    &mut fasta,
-                    data.window,
-                    data.chrom_length,
-                    &mut vcf_writer,
-                    &mut new_rec,
+                    let genotypes = rec.genotypes().expect("cant get genotypes");
+                    let genotype = genotypes.get(0); // assume only 1 and get the first one
+                    if is_heterozygous(genotype) {
+                        hets += 1;
+                        get_variant_assignments(
+                            &data.chrom,
+                            pos as usize,
+                            reference.to_string(),
+                            alternative.to_string(),
+                            data.min_mapq,
+                            data.min_base_qual,
+                            &mut long_read_bam_reader,
+                            &mut hic_bam_reader,
+                            &mut fasta,
+                            data.window,
+                            data.chrom_length,
+                            &mut vcf_writer,
+                            &mut new_rec,
+                        );
+                    }
+                    //if hets > 2000 {
+                    //    break;
+                    //} //TODO remove, for small example
+                }
+                println!(
+                    "done, saw {} records of which {} were hets in chrom {}",
+                    total, hets, data.chrom
                 );
-            }
-            //if hets > 2000 {
-            //    break;
-            //} //TODO remove, for small example
-        }
-        println!(
-            "done, saw {} records of which {} were hets in chrom {}",
-            total, hets, data.chrom
-        );
+            },
+            Err(_e) => (),
+        }; // skip to chromosome for this thread
+        
     } //creating my own scope to close vcf
 
     let result = Command::new("bcftools")
@@ -1605,10 +1610,10 @@ fn get_read_assignments(
             continue;
         }
         if read_start == None {
-            println!(
-                "what happened, read start {:?} read end {}",
-                read_start, read_end
-            );
+            //println!(
+            //    "what happened, read start {:?} read end {}",
+            //    read_start, read_end
+            //);
             continue;
         }
         let read_start = read_start.expect("why read start is none");
