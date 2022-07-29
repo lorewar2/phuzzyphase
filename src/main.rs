@@ -130,12 +130,15 @@ fn _main() -> Result<(), Error> {
         .num_threads(params.threads)
         .build()
         .unwrap();
-    let results: Vec<_> = pool.install(|| {
-        chunks
-            .par_iter()
-            .map(|rec_chunk| phase_chunk(&rec_chunk))
-            .collect()
-    });
+    //let results: Vec<_> = pool.install(|| {
+    //    chunks
+    //        .par_iter()
+    //        .map(|rec_chunk| phase_chunk(&rec_chunk))
+    //        .collect()
+    //});
+    for data in chunks {
+        pool.spawn(move || phase_chunk(&data).expect("thread failed"));
+    }
     Ok(())
 }
 
