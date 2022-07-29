@@ -96,6 +96,7 @@ fn _main() -> Result<(), Error> {
     //let vcf_reader = bcf::IndexedReader::from_path(params.vcf.to_string())?;
     let mut chunks: Vec<ThreadData> = Vec::new();
     for (i, chrom) in chroms.iter().enumerate() {
+        if chrom.chars().count() > 5 { continue; }
         println!("chrom {}end",chrom);
         let data = ThreadData {
             index: i,
@@ -356,6 +357,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
 
     let new_phase_blocks = phase_phaseblocks(data, &mut cluster_centers, &phase_blocks);
     output_phased_vcf(data, cluster_centers, phase_blocks);
+
     Ok(())
 }
 
