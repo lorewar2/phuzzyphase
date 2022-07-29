@@ -144,10 +144,11 @@ fn _main() -> Result<(), Error> {
     //}
     let pool = ThreadPool::new(params.threads);
     let barrier = Arc::new(Barrier::new(params.threads + 1));
+    let final_output = format!("{}/phasstphase.vcf.gz",params.output);
     let mut cmd: Vec<String> = Vec::new();
     cmd.push("concat".to_string());
     cmd.push("-o".to_string());
-    cmd.push(format!("{}/phasstphase.vcf.gz",params.output));
+    cmd.push(final_output.to_string());
     
     for data in chunks {
         cmd.push(format!("{}/phased_chrom_{}.vcf.gz", data.output, data.chrom));
@@ -159,6 +160,10 @@ fn _main() -> Result<(), Error> {
         .args(&cmd)
         .status()
         .expect("bcftools failed us");
+    let result = Command::new("tabix")
+        .args(&["-p", "vcf", &final_output])
+        .status()
+        .expect("couldn't tabix index final vcf");
     Ok(())
 }
 
