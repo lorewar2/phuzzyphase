@@ -144,10 +144,21 @@ fn _main() -> Result<(), Error> {
     //}
     let pool = ThreadPool::new(params.threads);
     let barrier = Arc::new(Barrier::new(params.threads + 1));
+    let mut cmd: Vec<String> = Vec::new();
+    cmd.push("concat".to_string());
+    cmd.push("-o".to_string());
+    cmd.push(format!("{}/phasstphase.vcf.gz",params.output));
+    
     for data in chunks {
+        cmd.push(format!("{}/phased_chrom_{}.vcf.gz", data.output, data.chrom));
         pool.execute(move|| phase_chunk(&data).expect("thread failed"));
     }
     barrier.wait();
+   
+    let result = Command::new("bcftools")
+        .args(&cmd)
+        .status()
+        .expect("bcftools failed us");
     Ok(())
 }
 
