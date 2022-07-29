@@ -156,7 +156,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         //println!("yeah, we are getting all variant assignments in thread {} chrom {}", data.index, data.chrom);
         get_all_variant_assignments(data).expect("we error here at get all variant assignments");
     }
-
+    println!("gothere {} chrom{}after", data.index, data.chrom);
     let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
     let chrom = vcf_reader
