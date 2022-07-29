@@ -9,6 +9,7 @@ edition = "2018"
 clap = {version = "~2.27.0", features = ["yaml"]}
 hashbrown = "0.1"
 rayon = "*"
+threadpool = "*"
 rand = "*"
 bio = ">=0.29"
 rust-htslib = ">=0.36"

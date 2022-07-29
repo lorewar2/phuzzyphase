@@ -4,6 +4,7 @@ extern crate bio;
 extern crate hashbrown;
 extern crate rand;
 extern crate rayon;
+extern crate threadpool;
 extern crate statrs;
 extern crate petgraph;
 extern crate sanitize_filename;
@@ -13,6 +14,8 @@ use rand::Rng;
 use rand::SeedableRng;
 use std::process::Command;
 use std::{thread, time};
+use threadpool::ThreadPool;
+use std::sync::{Arc, Barrier};
 
 use statrs::distribution::{Binomial};
 use statrs::distribution::Discrete;
@@ -126,19 +129,25 @@ fn _main() -> Result<(), Error> {
         };
         chunks.push(data);
     }
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(params.threads)
-        .build()
-        .unwrap();
+    //let pool = rayon::ThreadPoolBuilder::new()
+    //    .num_threads(params.threads)
+    //    .build()
+    //    .unwrap();
     //let results: Vec<_> = pool.install(|| {
     //    chunks
     //        .par_iter()
     //        .map(|rec_chunk| phase_chunk(&rec_chunk))
     //        .collect()
     //});
+    //for data in chunks {
+    //   pool.spawn(move || phase_chunk(&data).expect("thread failed"));
+    //}
+    let pool = ThreadPool::new(params.threads);
+    let barrier = Arc::new(Barrier::new(params.threads + 1));
     for data in chunks {
-        pool.spawn(move || phase_chunk(&data).expect("thread failed"));
+        pool.execute(move|| phase_chunk(&data).expect("thread failed"));
     }
+    barrier.wait();
     Ok(())
 }
 
