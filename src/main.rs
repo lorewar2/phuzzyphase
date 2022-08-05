@@ -8,6 +8,11 @@ extern crate threadpool;
 extern crate statrs;
 extern crate petgraph;
 extern crate sanitize_filename;
+extern crate log;
+
+use log::{debug, error, log_enabled, info, Level};
+
+
 
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -88,19 +93,19 @@ fn _main() -> Result<(), Error> {
         .expect(&format!("error opening fasta index: {}", fai))
         .sequences();
     let mut chroms: Vec<String> = Vec::new();
-    //chroms.push("chr20".to_string());
+    chroms.push("chr5".to_string()); // TODO remove
     let mut chrom_lengths: Vec<u64> = Vec::new();
-    //chrom_lengths.push(63025520);
-    for chrom in fa_index_iter {
-        chroms.push(chrom.name.to_string());
-        chrom_lengths.push(chrom.len);
-    }
+    chrom_lengths.push(181538259); // TODO remove
+    //for chrom in fa_index_iter { // TODO uncomment
+    //    chroms.push(chrom.name.to_string());
+    //    chrom_lengths.push(chrom.len);
+    //}
     
     //let vcf_reader = bcf::IndexedReader::from_path(params.vcf.to_string())?;
     let mut chunks: Vec<ThreadData> = Vec::new();
     for (i, chrom) in chroms.iter().enumerate() {
         //if chrom.chars().count() > 5 { continue; }
-        println!("chrom {}end",chrom);
+        debug!("chrom {}end",chrom);
         let data = ThreadData {
             index: i,
             long_read_bam: match &params.long_read_bam {
@@ -175,13 +180,13 @@ struct PhaseBlock {
 }
 
 fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
-    println!("thread {} chrom {}end", data.index, data.chrom);
+    debug!("thread {} chrom {}end", data.index, data.chrom);
 
     if !Path::new(&data.vcf_out_done).exists() {
         //println!("yeah, we are getting all variant assignments in thread {} chrom {}", data.index, data.chrom);
         get_all_variant_assignments(data).expect("we error here at get all variant assignments");
     }
-    println!("gothere {} chrom{}after", data.index, data.chrom);
+    debug!("gothere {} chrom{}after", data.index, data.chrom);
     let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
     let chrom = vcf_reader
@@ -233,20 +238,15 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 for phase_block in cut_blocks {
                     phase_blocks.push(phase_block);
                 }
-                //phase_blocks.push(PhaseBlock {
-                //    start_index: phase_block_start,
-                //    start_position: vcf_info.variant_positions[phase_block_start],
-                //    end_index: last_attempted_index,
-                //    end_position: vcf_info.variant_positions[last_attempted_index],
-                //});
-                println!(
-                    "PHASE BLOCK ENDING {}-{}, {}-{} length {}",
-                    phase_block_start,
-                    last_attempted_index,
-                    vcf_info.variant_positions[phase_block_start],
-                    vcf_info.variant_positions[last_attempted_index],
-                    vcf_info.variant_positions[last_attempted_index] - vcf_info.variant_positions[phase_block_start]
-                );
+                
+                //println!(
+                //    "PHASE BLOCK ENDING {}-{}, {}-{} length {}",
+                //    phase_block_start,
+                //    last_attempted_index,
+                //    vcf_info.variant_positions[phase_block_start],
+                //    vcf_info.variant_positions[last_attempted_index],
+                //    vcf_info.variant_positions[last_attempted_index] - vcf_info.variant_positions[phase_block_start]
+                //);
                 phase_block_start = last_attempted_index + 1;
                 window_start = vcf_info.variant_positions[phase_block_start];
                 //eprintln!("reseting window start to {}", window_start);
@@ -329,7 +329,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         window_end = window_end.min(vcf_info.final_position as usize);
         //break;
     }
-
+    debug!("DONE phasing long reads! thread {} chrom {}", data.index, data.chrom);
     let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
     for phase_block in cut_blocks {
         phase_blocks.push(phase_block);
@@ -341,7 +341,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     //    end_position: vcf_info.variant_positions[last_attempted_index],
     //});
 
-    println!("DONE!");
+    debug!("DONE long switch test! thread {} chrom {}", data.index, data.chrom);
     let mut total_gap_length = 0;
     for (id, phase_block) in phase_blocks.iter().enumerate() {
         let mut gap = phase_block.start_position;
@@ -349,7 +349,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
             gap = phase_block.start_position - phase_blocks[id - 1].end_position;
         }
         total_gap_length += gap;
-        println!(
+        info!(
             "phase block {} from {}-{}, {}-{} length {} with gap from last of {}",
             id,
             phase_block.start_position,
@@ -361,10 +361,10 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         );
     }
     if phase_blocks.len() > 0 {
-        println!("and final gap of {}", (data.chrom_length as usize) - phase_blocks[phase_blocks.len() - 1].end_position);
+        info!("and final gap of {}", (data.chrom_length as usize) - phase_blocks[phase_blocks.len() - 1].end_position);
     }
     
-    println!("with total gap length of {}", total_gap_length);
+    info!("with total gap length of {}", total_gap_length);
     // get phaseblock N50... 
     let mut sizes: Vec<usize> = Vec::new();
     let mut total: usize = 0;
@@ -384,8 +384,9 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     }
 
     let new_phase_blocks = phase_phaseblocks(data, &mut cluster_centers, &phase_blocks);
+    debug!("DONE hic phasing! thread {} chrom {}", data.index, data.chrom);
     output_phased_vcf(data, cluster_centers, phase_blocks);
-    println!("thread {} chrom {}finished", data.index, data.chrom);
+    debug!("thread {} chrom {}finished", data.index, data.chrom);
     Ok(())
 }
 
@@ -510,6 +511,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         .expect("cant get chrom rid");
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let mut phase_block_ids: HashMap<usize,usize> = HashMap::new();
+    debug!("entering hic phasing with {} phase blocks", phase_blocks.len());
     for (id, phase_block) in phase_blocks.iter().enumerate() {
         //eprintln!("phase block {} from {}-{}",id, phase_block.start_index, phase_block.end_index);
         for i in phase_block.start_index..(phase_block.end_index+1) {
@@ -521,10 +523,11 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         .fetch(chrom, 0, None)
         .expect("some actual error");
     let (hic_reads, _, _) = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
-    println!("{} hic reads hitting > 1 variant", hic_reads.len());
-    let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
+    info!("{} hic reads hitting > 1 variant", hic_reads.len());
+    // let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
+    // ok that is a map from (phase_block_id1, phase_block_id2) to a map from (pb1_hap, pb2_hap) to counts
     let mut allele_pair_counts: HashMap<(usize, usize), [u64; 4]> = HashMap::new();
-    // ok that is a map from (phase_block_id, phase_block_id) to a map from (pb1_hap, pb2_hap) to counts
+    // and a map from (allele_index1, allele_index2) to  counts array for [1/1, 1/0, 0/1, 0/0]
     for hic_read in hic_reads {
         for i in 0..hic_read.len() {
             for j in (i+1)..hic_read.len() {
@@ -559,6 +562,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                         }
                     }
                 }
+                /*
                 let mut allele1_haps: Vec<u8> = Vec::new();
                 let mut allele2_haps: Vec<u8> = Vec::new();
                 for haplotype in 0..cluster_centers.len() {
@@ -585,11 +589,15 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                         }
                     }
                 }
+                */
             }
+            
         }
     }
-
+    debug!("DONE building allele pair counts (size {})! thread {} chrom {}", allele_pair_counts.len(), data.index, data.chrom);
+    
     let mut phase_block_pair_phasing_log_likelihoods: HashMap<(usize, usize), HashMap<usize, f64>> = HashMap::new();
+    // this is a map from (phase_block_id1, phase_block_id2) 
     // okay now i have allele_pair_counts which will contribute log likelihoods to phaseblock pairs
     let all_possible_pairings = pairings(data.ploidy); // get all pairings
     let log_phasing_prior = (1.0/(all_possible_pairings.len() as f64)).ln();
@@ -609,7 +617,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         for (pairing_index, haplotype_pairs) in all_possible_pairings.iter().enumerate() {
             let log_likelihood = phase_block_log_likelihoods.entry(pairing_index).or_insert(log_phasing_prior);
             //eprintln!("\tmarriage {}:{:?}",pairing_index, haplotype_pairs);
-            let mut pair_probabilities: [f64;4] = [error;4];
+            let mut pair_probabilities: [f64;4] = [error; 4];
             let mut total = 0.0; // for normalization to sum to 1
             //for hap in 0..data.ploidy {
             //    eprintln!("\t\thaplotype {} allele1 frac {}, allele2 frac {}", 
@@ -632,8 +640,8 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             //eprintln!("\t\t\tlikelihood update {}, in log {}, total log {}",multinomial_distribution.pmf(counts), multinomial_distribution.ln_pmf(counts), log_likelihood);
         }
     }
-    
-    
+    debug!("DONE creating phase block pair log likelihoods (size {})! thread {} chrom {}", phase_block_pair_phasing_log_likelihoods.len(), data.index, data.chrom);
+
     let mut union_find: UnionFind<usize> = UnionFind::new(phase_blocks.len());
     // now for each phase block pair, we will normalize the pairing marginal log likelihoods to sum to 1 giving us
     // posterior probabilities for each marriage
@@ -657,12 +665,13 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                 max_index = i;
             }
         }
-        eprintln!("after normalizing, phase blocks {} and {} with pairing {} and posterior {}", phase_block1, phase_block2, max_index, max);
+        debug!("after normalizing, phase blocks {} and {} with pairing {} and posterior {}", phase_block1, phase_block2, max_index, max);
         if max > data.hic_phasing_posterior_threshold {
             union_find.union(*phase_block1, *phase_block2);
         }
     }
 
+    
     let mut problem_phaseblocks: HashMap<usize, usize> = HashMap::new();// map from phase block to the number of triangles it ruins
     for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
         for ((phase_block3, phase_block4), marriage_log_likelihoods2) in phase_block_pair_phasing_log_likelihoods.iter() {
@@ -712,8 +721,8 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     let mut count_vec: Vec<(&usize, &usize)> = problem_phaseblocks.iter().collect();
     count_vec.sort_by(|a, b| b.1.cmp(a.1));
 
-
-    println!("problem phaseblocks ruining triangles {:?}", count_vec);
+    debug!("DONE checking triangles (bad triangles {:?})! thread {}, chrom {}",count_vec, data.index, data.chrom);
+    //debug!("problem phaseblocks ruining triangles {:?}", count_vec);
 
 
     let labeling = union_find.into_labeling();
@@ -734,15 +743,15 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         sizes.push(total_length);
         total += total_length;
     }
-    println!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
+    debug!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
     sizes.sort_by(|a, b| b.cmp(a));
-    println!("{:?}", sizes);
-    println!("total length of phased region for chrom {} is {} vs chrom length of {}", data.chrom, total, data.chrom_length);
+    info!("{:?}", sizes);
+    info!("total length of phased region for chrom {} is {} vs chrom length of {}", data.chrom, total, data.chrom_length);
     let mut so_far = 0;
     for size in sizes {
         so_far += size;
         if so_far > total/2 {
-            println!("After hic phasing the N50 phase blocks for chrom {} is {}", data.chrom, size);
+            info!("After hic phasing the N50 phase blocks for chrom {} is {}", data.chrom, size);
             break;
         }
     }
