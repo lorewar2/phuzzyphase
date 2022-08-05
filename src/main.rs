@@ -1130,12 +1130,13 @@ fn maximization(
             *max_index = (*max_index).max(*variant_index);
             for haplotype in 0..haplotypes.len() {
                 let numerators_denominators = haplotypes[haplotype];
-                let allele_fraction = (numerators_denominators.0 / numerators_denominators.1)
+                let allele_fraction = (numerators_denominators.0 / numerators_denominators.1);
+                let cluster_value = allele_fraction
                     .max(0.001)
                     .min(0.999);
                 total_change +=
                     (allele_fraction - cluster_centers[haplotype][*variant_index]).abs();
-                cluster_centers[haplotype][*variant_index] = allele_fraction;
+                cluster_centers[haplotype][*variant_index] = cluster_value;
             }
         }
     }
