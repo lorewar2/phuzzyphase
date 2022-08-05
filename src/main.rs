@@ -203,6 +203,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     //let mut position_to_index: HashMap<usize, usize> = HashMap::new();
     //let mut position_so_far: usize = 0;
     let mut phase_blocks: Vec<PhaseBlock> = Vec::new();
+    let mut putative_phase_blocks: Vec<PhaseBlock> = Vec::new();
     let mut phase_block_start: usize = 0;
     let mut last_attempted_index: usize = 0;
     let mut in_phaseblock = false;
@@ -236,10 +237,16 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     last_attempted_index -= 1;
                 }
                 
-                let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
-                for phase_block in cut_blocks {
-                    phase_blocks.push(phase_block);
-                }
+                //let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
+                //for phase_block in cut_blocks {
+                //    phase_blocks.push(phase_block);
+                //}
+                putative_phase_blocks.push(PhaseBlock{
+                    start_index: phase_block_start,
+                    start_position: vcf_info.variant_positions[phase_block_start],
+                    end_index: last_attempted_index,
+                    end_position: vcf_info.variant_positions[last_attempted_index]
+                });
                 
                 //println!(
                 //    "PHASE BLOCK ENDING {}-{}, {}-{} length {}",
@@ -332,10 +339,21 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         //break;
     }
     debug!("DONE phasing long reads! thread {} chrom {}", data.index, data.chrom);
-    let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
-    for phase_block in cut_blocks {
-        phase_blocks.push(phase_block);
+    if in_phaseblock {
+        putative_phase_blocks.push(PhaseBlock{
+            start_index: phase_block_start,
+            start_position: vcf_info.variant_positions[phase_block_start],
+            end_index: last_attempted_index,
+            end_position: vcf_info.variant_positions[last_attempted_index]
+        });
     }
+    for putative_phase_block in putative_phase_blocks {
+        let cut_blocks = test_long_switch(putative_phase_block.start_index, putative_phase_block.end_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
+        for phase_block in cut_blocks {
+            phase_blocks.push(phase_block);
+        }
+    }
+    
     //phase_blocks.push(PhaseBlock {
     //    start_index: phase_block_start,
     //    start_position: vcf_info.variant_positions[phase_block_start],
