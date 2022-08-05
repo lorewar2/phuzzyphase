@@ -285,7 +285,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     phase_block_start = last_var_index + 1;
                 }
                 
-                if phase_block_start > vcf_info.variant_positions.len() {
+                if phase_block_start >= vcf_info.variant_positions.len() {
                     break 'outer;
                 }
                 window_start = vcf_info.variant_positions[phase_block_start];
