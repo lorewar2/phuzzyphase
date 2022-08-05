@@ -11,7 +11,7 @@ extern crate sanitize_filename;
 extern crate log;
 extern crate env_logger;
 
-use log::{debug, error, log_enabled, info, Level};
+use log::{debug, error, log_enabled, info, trace, Level};
 
 
 
@@ -447,13 +447,13 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
                 .fetch(chrom, (position as u64).checked_sub(15000).unwrap_or(0), Some(position as u64))
                 .expect("could not fetch in vcf");
                 let (molecules, first_var_index, last_var_index)  = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
-            eprintln!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, positions {}-{}, posterior {}, breakpoint {} position {} with {} molecules", 
+            trace!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, positions {}-{}, posterior {}, breakpoint {} position {} with {} molecules", 
                 start_index, end_index, start_position, end_position, posterior, breakpoint, position, molecules.len());
             let (_break, posteriors, log_likelihood) = expectation(&molecules, &cluster_centers);
             //eprintln!("mol posteriors {:?}", posteriors);
 
-            eprintln!("hap1 {:?}", &cluster_centers[0][breakpoint..(breakpoint+10)]);
-            eprintln!("hap2 {:?}", &cluster_centers[1][breakpoint..(breakpoint+10)]);
+            trace!("hap1 {:?}", &cluster_centers[0][breakpoint..(breakpoint+10)]);
+            trace!("hap2 {:?}", &cluster_centers[1][breakpoint..(breakpoint+10)]);
         
         }
         /*** else {
