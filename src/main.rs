@@ -314,8 +314,10 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 &mut min_index,
                 &mut max_index,
             );
-            if last_cluster_center_delta != 10.0 && cluster_center_delta >= last_cluster_center_delta {
+            if last_cluster_center_delta != 10.0 && cluster_center_delta > last_cluster_center_delta {
                 error!("cluster center delta not decreasing! {} to {}", last_cluster_center_delta, cluster_center_delta);
+            } else if last_cluster_center_delta != 10.0 && cluster_center_delta == last_cluster_center_delta {
+                break;
             }
             last_cluster_center_delta = cluster_center_delta;
             if max_index != 0 {
