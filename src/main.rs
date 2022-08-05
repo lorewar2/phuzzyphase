@@ -208,9 +208,16 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     let mut last_attempted_index: usize = 0;
     let mut in_phaseblock = false;
     eprintln!("{}", vcf_info.final_position);
+    let mut last_window_start: Option<usize> = None;
     'outer: while (window_start as u64) < data.chrom_length
         && window_start < vcf_info.final_position as usize
     {
+        if let Some(last_start) = last_window_start {
+            if last_start >= window_start {
+                error!("last window start is >= current start {} >= {}", last_start, window_start);
+            }
+        }
+        last_window_start = Some(window_start);
         let mut cluster_center_delta: f32 = 10.0;
         vcf_reader
             .fetch(chrom, window_start as u64, Some(window_end as u64))
@@ -224,7 +231,8 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         let mut iteration = 0;
         let mut min_index: usize = 0;
         let mut max_index: usize = 0;
-
+        let mut last_cluster_center_delta = cluster_center_delta;
+        
         while cluster_center_delta > 0.01 {
             let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers);
             if in_phaseblock && breaking_point {
@@ -268,7 +276,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 }
                 
                 continue 'outer;
-            } if !in_phaseblock && breaking_point {
+            } else if !in_phaseblock && breaking_point {
                 if first_var_index == usize::MAX { // there were no variants
                     // we need to find a new starting point
                     
@@ -306,6 +314,10 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 &mut min_index,
                 &mut max_index,
             );
+            if last_cluster_center_delta != 10.0 && cluster_center_delta >= last_cluster_center_delta {
+                error!("cluster center delta not decreasing! {} to {}", last_cluster_center_delta, cluster_center_delta);
+            }
+            last_cluster_center_delta = cluster_center_delta;
             if max_index != 0 {
                 last_attempted_index = max_index;
                 if !in_phaseblock {
