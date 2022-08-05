@@ -1135,7 +1135,7 @@ fn maximization(
                     .max(0.001)
                     .min(0.999);
                 total_change +=
-                    (allele_fraction - cluster_centers[haplotype][*variant_index]).abs();
+                    (cluster_value - cluster_centers[haplotype][*variant_index]).abs();
                 cluster_centers[haplotype][*variant_index] = cluster_value;
             }
         }
