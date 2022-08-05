@@ -9,6 +9,7 @@ extern crate statrs;
 extern crate petgraph;
 extern crate sanitize_filename;
 extern crate log;
+extern crate env_logger;
 
 use log::{debug, error, log_enabled, info, Level};
 
@@ -58,6 +59,7 @@ const GAP_OPEN: i32 = -5; // Gap open score
 const GAP_EXTEND: i32 = -1; // Gap extend score
 
 fn main() {
+    env_logger::init();
     let result = _main();
     if let Err(v) = result {
         let fail = v.as_fail();
