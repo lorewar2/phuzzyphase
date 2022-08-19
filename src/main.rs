@@ -316,7 +316,9 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
             );
             if iteration != 0 && cluster_center_delta > last_cluster_center_delta {
                 error!("cluster center delta not decreasing! {} to {}", last_cluster_center_delta, cluster_center_delta);
-            } else if last_cluster_center_delta != 10.0 && cluster_center_delta == last_cluster_center_delta {
+                eprintln!("cluster center delta not decreasing! {} to {}", last_cluster_center_delta, cluster_center_delta);
+            } else if iteration != 0 && cluster_center_delta == last_cluster_center_delta {
+                eprintln!("cluster center delta not decreasing! {} to {}", last_cluster_center_delta, cluster_center_delta);
                 break;
             }
             last_cluster_center_delta = cluster_center_delta;
