@@ -1362,6 +1362,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
                     total += 1;
                     let rec = _rec.expect("cant unwrap vcf record");
                     let pos = rec.pos();
+                    eprintln!("{}, {}", i, pos);
                     let alleles = rec.alleles();
                     let mut new_rec = vcf_writer.empty_record();
                     copy_vcf_record(&mut new_rec, &rec);
