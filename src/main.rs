@@ -1329,6 +1329,7 @@ fn init_cluster_centers(num: usize, data: &ThreadData) -> Vec<Vec<f32>> {
 }
 
 fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
+    eprintln!("get all variant assignemnts");
     let mut long_read_bam_reader = match &data.long_read_bam {
         Some(x) => Some(bam::IndexedReader::from_path(x).expect("could not open bam, maybe no index?")),
         None => None,
@@ -1375,6 +1376,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
                     let genotype = genotypes.get(0); // assume only 1 and get the first one
                     if is_heterozygous(genotype) {
                         hets += 1;
+                        eprintln!("it is a het");
                         get_variant_assignments(
                             &data.chrom,
                             pos as usize,
@@ -1404,6 +1406,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
         }; // skip to chromosome for this thread
         
     } //creating my own scope to close vcf
+    eprintln!("finished scope which closes the file");
 
     let result = Command::new("bcftools")
         .args(&["index", "-f", &data.vcf_out])
@@ -1596,6 +1599,7 @@ fn get_variant_assignments<'a>(
     vcf_writer: &mut bcf::Writer,
     vcf_record: &mut bcf::record::Record,
 ) {
+    eprintln!("get variant assignments");
     if (pos + window) as u64 > chrom_length {
         return;
     }
@@ -1626,6 +1630,7 @@ fn get_variant_assignments<'a>(
         None => (),
     }
     vcf_writer.write(vcf_record).expect("nope");
+    eprintln!("wrote a record");
 }
 
 fn get_read_assignments(
