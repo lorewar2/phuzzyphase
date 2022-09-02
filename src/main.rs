@@ -233,7 +233,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         let mut last_cluster_center_delta = cluster_center_delta;
         
         while cluster_center_delta > 0.01 {
-            let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, false);
+            let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
             if in_phaseblock && breaking_point {
                 //println!(
                 //    "BREAKING due to no posteriors differing... window {}-{}",
@@ -312,20 +312,12 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 &mut cluster_centers,
                 &mut min_index,
                 &mut max_index,
-                false
+                true
             );
             if iteration != 0 && cluster_center_delta > last_cluster_center_delta {
                 error!("cluster center delta not decreasing! {} to {}, position {}-{}", last_cluster_center_delta, cluster_center_delta, window_start, window_end);
                 error!("poseriors {:?}", posteriors);
                 let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
-                cluster_center_delta = maximization(
-                    &molecules,
-                    &posteriors,
-                    &mut cluster_centers,
-                    &mut min_index,
-                    &mut max_index,
-                    true
-                );
                 error!("and after another maximization cluster center delta was {}", cluster_center_delta);
 
             } else if iteration != 0 && cluster_center_delta == last_cluster_center_delta {
