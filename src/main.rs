@@ -233,7 +233,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         let mut last_cluster_center_delta = cluster_center_delta;
         
         while cluster_center_delta > 0.01 {
-            let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers);
+            let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, false);
             if in_phaseblock && breaking_point {
                 //println!(
                 //    "BREAKING due to no posteriors differing... window {}-{}",
@@ -317,6 +317,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
             if iteration != 0 && cluster_center_delta > last_cluster_center_delta {
                 error!("cluster center delta not decreasing! {} to {}, position {}-{}", last_cluster_center_delta, cluster_center_delta, window_start, window_end);
                 error!("poseriors {:?}", posteriors);
+                let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
                 cluster_center_delta = maximization(
                     &molecules,
                     &posteriors,
@@ -470,7 +471,7 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
         for pairing in pairings.iter() {
             swap(cluster_centers, breakpoint, &pairing, 50);
             
-            let (_break, _posteriors, log_likelihood) = expectation(&molecules, &cluster_centers);
+            let (_break, _posteriors, log_likelihood) = expectation(&molecules, &cluster_centers, false);
             log_likelihoods.push(log_likelihood + log_prior);
             swap(cluster_centers, breakpoint, &pairing, 50); // reversing the swap
         }
@@ -495,7 +496,7 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
                 let (molecules, first_var_index, last_var_index)  = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
             trace!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, positions {}-{}, posterior {}, breakpoint {} position {} with {} molecules", 
                 start_index, end_index, start_position, end_position, posterior, breakpoint, position, molecules.len());
-            let (_break, posteriors, log_likelihood) = expectation(&molecules, &cluster_centers);
+            let (_break, posteriors, log_likelihood) = expectation(&molecules, &cluster_centers, false);
             //eprintln!("mol posteriors {:?}", posteriors);
 
             trace!("hap1 {:?}", &cluster_centers[0][breakpoint..(breakpoint+10)]);
@@ -1109,7 +1110,8 @@ fn maximization(
         // if molecule does not support any haplotype over another, dont use it in maximization
         let mut different = false;
         for haplotype in 0..cluster_centers.len() {
-            if posteriors[molecule_index][haplotype] != posteriors[molecule_index][0] {
+            //if (posteriors[molecule_index][haplotype] - posteriors[molecule_index][0]).abs() < 0.01 { // but why would this happen?
+            if posteriors[molecule_index][haplotype] == posteriors[molecule_index][0] {
                 different = true;
             }
         }
@@ -1174,11 +1176,13 @@ fn maximization(
 fn expectation(
     molecules: &Vec<Vec<Allele>>,
     cluster_centers: &Vec<Vec<f32>>,
+    debug: bool,
 ) -> (bool, Vec<Vec<f32>>, f32) {
     let mut posteriors: Vec<Vec<f32>> = Vec::new();
     let mut any_different = false;
     let mut log_likelihood: f32 = 0.0;
-    for molecule in molecules.iter() {
+
+    for (moldex, molecule) in molecules.iter().enumerate() {
         let mut log_probs: Vec<f32> = Vec::new(); // for each haplotype
         for haplotype in 0..cluster_centers.len() {
             let mut log_prob = 0.0; // log(0) = probability 1
@@ -1188,6 +1192,10 @@ fn expectation(
                     log_prob += cluster_centers[haplotype][allele.index].ln(); // adding in log space, multiplying in probability space
                 } else {
                     log_prob += (1.0 - cluster_centers[haplotype][allele.index]).ln();
+                }
+                if debug {
+                    error!("mol {}, hap {}, variant index {}, allele {}, cluster center {}",moldex, haplotype, allele.index, 
+                     allele.allele, cluster_centers[haplotype][allele.index]);
                 }
             }
             
