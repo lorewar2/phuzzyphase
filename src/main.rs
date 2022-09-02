@@ -1285,7 +1285,10 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
         }
     }
     let mut to_return: Vec<Vec<Allele>> = Vec::new();
-    for (_read_name, alleles) in molecules.iter() {
+    for (index, (_read_name, alleles)) in molecules.iter().enumerate() {
+        if index > 5 {
+            continue; // TODO REMOVE THIS IS FOR DEBUG
+        }
         if alleles.len() < 2 {
             continue;
         }
