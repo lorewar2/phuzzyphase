@@ -1192,7 +1192,7 @@ fn expectation(
                 }
                 if debug {
                     error!("mol {}, hap {}, variant index {}, allele {}, cluster center {} adding {} to log_prob",moldex, haplotype, allele.index, 
-                    allele.allele, cluster_centers[haplotype][allele.index]);
+                    allele.allele, cluster_centers[haplotype][allele.index],lp);
                 }
             }
             
