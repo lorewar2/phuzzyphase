@@ -234,6 +234,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         
         while cluster_center_delta > 0.01 {
             let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
+            error!("{:?}",posteriors);
             if in_phaseblock && breaking_point {
                 //println!(
                 //    "BREAKING due to no posteriors differing... window {}-{}",
