@@ -207,7 +207,6 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     let mut phase_block_start: usize = 0;
     let mut last_attempted_index: usize = 0;
     let mut in_phaseblock = false;
-    eprintln!("{}", vcf_info.final_position);
     let mut last_window_start: Option<usize> = None;
     'outer: while (window_start as u64) < data.chrom_length
         && window_start < vcf_info.final_position as usize
@@ -309,17 +308,27 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
             }
             cluster_center_delta = maximization(
                 &molecules,
-                posteriors,
+                &posteriors,
                 &mut cluster_centers,
                 &mut min_index,
                 &mut max_index,
+                false
             );
             if iteration != 0 && cluster_center_delta > last_cluster_center_delta {
-                error!("cluster center delta not decreasing! {} to {}", last_cluster_center_delta, cluster_center_delta);
-                eprintln!("cluster center delta not decreasing! {} to {}", last_cluster_center_delta, cluster_center_delta);
+                error!("cluster center delta not decreasing! {} to {}, position {}-{}", last_cluster_center_delta, cluster_center_delta, window_start, window_end);
+                error!("poseriors {:?}", posteriors);
+                cluster_center_delta = maximization(
+                    &molecules,
+                    &posteriors,
+                    &mut cluster_centers,
+                    &mut min_index,
+                    &mut max_index,
+                    true
+                );
+                error!("and after another maximization cluster center delta was {}", cluster_center_delta);
+
             } else if iteration != 0 && cluster_center_delta == last_cluster_center_delta {
-                eprintln!("cluster center delta not decreasing! {} to {}", last_cluster_center_delta, cluster_center_delta);
-                break;
+                error!("cluster center delta not decreasing! {} to {}, position {}-{}", last_cluster_center_delta, cluster_center_delta, window_start, window_end);
             }
             last_cluster_center_delta = cluster_center_delta;
             if max_index != 0 {
@@ -1085,10 +1094,11 @@ fn infer_genotype(cluster_centers: &Vec<Vec<f32>>, index: usize) -> Vec<Genotype
 
 fn maximization(
     molecules: &Vec<Vec<Allele>>,
-    posteriors: Vec<Vec<f32>>,
+    posteriors: &Vec<Vec<f32>>,
     cluster_centers: &mut Vec<Vec<f32>>,
     min_index: &mut usize,
     max_index: &mut usize,
+    debug: bool
 ) -> f32 {
     let mut updates: HashMap<usize, Vec<(f32, f32)>> = HashMap::new(); // variant index to vec across
     let mut variant_molecule_count: HashMap<usize, usize> = HashMap::new();
@@ -1126,9 +1136,11 @@ fn maximization(
             }
         }
     }
+    let mut updated_variants = 0;
     let mut total_change = 0.0;
     for (variant_index, haplotypes) in updates.iter() {
         if variant_molecule_count.get(variant_index).unwrap() > &3 { // TODO dont hard code, make parameters
+            updated_variants += 1;
             //TODO Dont hard code stuff
             *min_index = (*min_index).min(*variant_index);
             *max_index = (*max_index).max(*variant_index);
@@ -1140,9 +1152,18 @@ fn maximization(
                     .min(0.999);
                 total_change +=
                     (cluster_value - cluster_centers[haplotype][*variant_index]).abs();
+                if debug {
+                    error!("variant index {}, haplotype {}, numerator {} denom {}, previous {} new val {} after capping vals {} delta {}, total change thus far {}",
+                        variant_index, haplotype, numerators_denominators.0, numerators_denominators.1,
+                        cluster_centers[haplotype][*variant_index], allele_fraction, cluster_value, (cluster_value - cluster_centers[haplotype][*variant_index]).abs(),total_change);
+                    }
                 cluster_centers[haplotype][*variant_index] = cluster_value;
+
             }
         }
+    }
+    if debug {
+        error!("updated variants {}",updated_variants);
     }
     total_change
 }
