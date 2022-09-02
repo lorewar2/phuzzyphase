@@ -234,7 +234,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         
         while cluster_center_delta > 0.01 {
             let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
-            error!("{:?}",posteriors);
+            error!("posteriors {:?}",posteriors);
             if in_phaseblock && breaking_point {
                 //println!(
                 //    "BREAKING due to no posteriors differing... window {}-{}",
@@ -1094,6 +1094,7 @@ fn maximization(
     max_index: &mut usize,
     debug: bool
 ) -> f32 {
+    error!("in maximization");
     let mut updates: HashMap<usize, Vec<(f32, f32)>> = HashMap::new(); // variant index to vec across
     let mut variant_molecule_count: HashMap<usize, usize> = HashMap::new();
     *min_index = std::usize::MAX;
@@ -1174,21 +1175,24 @@ fn expectation(
     let mut posteriors: Vec<Vec<f32>> = Vec::new();
     let mut any_different = false;
     let mut log_likelihood: f32 = 0.0;
-
+    error!("in expectation");
     for (moldex, molecule) in molecules.iter().enumerate() {
         let mut log_probs: Vec<f32> = Vec::new(); // for each haplotype
         for haplotype in 0..cluster_centers.len() {
             let mut log_prob = 0.0; // log(0) = probability 1
             for allele in molecule.iter() {
+                let lp;
                 if allele.allele {
                     // alt allele
+                    lp = cluster_centers[haplotype][allele.index].ln();
                     log_prob += cluster_centers[haplotype][allele.index].ln(); // adding in log space, multiplying in probability space
                 } else {
+                    lp = (1.0 - cluster_centers[haplotype][allele.index]).ln();
                     log_prob += (1.0 - cluster_centers[haplotype][allele.index]).ln();
                 }
                 if debug {
-                    error!("mol {}, hap {}, variant index {}, allele {}, cluster center {}",moldex, haplotype, allele.index, 
-                     allele.allele, cluster_centers[haplotype][allele.index]);
+                    error!("mol {}, hap {}, variant index {}, allele {}, cluster center {} adding {} to log_prob",moldex, haplotype, allele.index, 
+                    allele.allele, cluster_centers[haplotype][allele.index]);
                 }
             }
             
