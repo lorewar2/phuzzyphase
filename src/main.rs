@@ -231,7 +231,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         let mut min_index: usize = 0;
         let mut max_index: usize = 0;
         let mut last_cluster_center_delta = cluster_center_delta;
-        
+        error!("next window {}-{}", window_start, window_end);
         while cluster_center_delta > 0.01 {
             let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
             error!("posteriors {:?}",posteriors);
@@ -1109,10 +1109,10 @@ fn maximization(
                 different = true;
             }
         }
-        if !different {
+        //if !different {
             //println!("debug, molecule does not support any haplotype over another");
-            continue;
-        }
+        //    continue;
+        //}
         for allele in &molecules[molecule_index] {
             let variant_index = allele.index;
             let alt = allele.allele;
