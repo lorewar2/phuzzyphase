@@ -1391,7 +1391,6 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
                     total += 1;
                     let rec = _rec.expect("cant unwrap vcf record");
                     let pos = rec.pos();
-                    eprintln!("{}, {}", i, pos);
                     let alleles = rec.alleles();
                     let mut new_rec = vcf_writer.empty_record();
                     copy_vcf_record(&mut new_rec, &rec);
@@ -1406,7 +1405,6 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
                     let genotype = genotypes.get(0); // assume only 1 and get the first one
                     if is_heterozygous(genotype) {
                         hets += 1;
-                        eprintln!("it is a het");
                         get_variant_assignments(
                             &data.chrom,
                             pos as usize,
@@ -1629,7 +1627,6 @@ fn get_variant_assignments<'a>(
     vcf_writer: &mut bcf::Writer,
     vcf_record: &mut bcf::record::Record,
 ) {
-    eprintln!("get variant assignments");
     if (pos + window) as u64 > chrom_length {
         return;
     }
@@ -1660,7 +1657,6 @@ fn get_variant_assignments<'a>(
         None => (),
     }
     vcf_writer.write(vcf_record).expect("nope");
-    eprintln!("wrote a record");
 }
 
 fn get_read_assignments(
