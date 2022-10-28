@@ -95,9 +95,9 @@ fn _main() -> Result<(), Error> {
         .expect(&format!("error opening fasta index: {}", fai))
         .sequences();
     let mut chroms: Vec<String> = Vec::new();
-    chroms.push("5".to_string()); // TODO remove
+    chroms.push("20".to_string()); // TODO remove
     let mut chrom_lengths: Vec<u64> = Vec::new();
-    chrom_lengths.push(180857866); // TODO remove
+    chrom_lengths.push(64444167); // TODO remove
     //for chrom in fa_index_iter { // TODO uncomment
     //    chroms.push(chrom.name.to_string());
     //    chrom_lengths.push(chrom.len);
@@ -181,6 +181,137 @@ struct PhaseBlock {
     end_position: usize,
 }
 
+fn maximization(
+    molecules: &Vec<Vec<Allele>>,
+    posteriors: &Vec<Vec<f32>>,
+    cluster_centers: &mut Vec<Vec<f32>>,
+    min_index: &mut usize,
+    max_index: &mut usize,
+) -> f32 {
+    let mut updates: HashMap<usize, Vec<(f32, f32)>> = HashMap::new(); // variant index to vec across
+    let mut variant_molecule_count: HashMap<usize, usize> = HashMap::new();
+    *min_index = std::usize::MAX;
+    *max_index = 0;
+    // haplotype clusters to a tuple of (numerator, denominator)
+    for molecule_index in 0..molecules.len() {
+        // if molecule does not support any haplotype over another, dont use it in maximization
+        let mut different = false;
+        for haplotype in 0..cluster_centers.len() {
+            //if (posteriors[molecule_index][haplotype] - posteriors[molecule_index][0]).abs() < 0.01 { // but why would this happen?
+            if posteriors[molecule_index][haplotype] == posteriors[molecule_index][0] {
+                different = true;
+            }
+        }
+        //if !different {
+            //println!("debug, molecule does not support any haplotype over another");
+        //    continue;
+        //}
+        for allele in &molecules[molecule_index] {
+            let variant_index = allele.index;
+            let alt = allele.allele;
+            let count = variant_molecule_count.entry(variant_index).or_insert(0);
+            *count += 1;
+            for haplotype in 0..cluster_centers.len() {
+                let posterior = posteriors[molecule_index][haplotype];
+                let numerators_denominators = updates
+                    .entry(variant_index)
+                    .or_insert(vec![(0.0, 0.0); cluster_centers.len()]);
+                if alt {
+                    numerators_denominators[haplotype].0 += posterior;
+                    numerators_denominators[haplotype].1 += posterior;
+                } else {
+                    numerators_denominators[haplotype].1 += posterior;
+                }
+            }
+        }
+    }
+    let mut updated_variants = 0;
+    let mut total_change = 0.0;
+    for (variant_index, haplotypes) in updates.iter() {
+        if variant_molecule_count.get(variant_index).unwrap() > &3 { // TODO dont hard code, make parameters
+            updated_variants += 1;
+            //TODO Dont hard code stuff
+            *min_index = (*min_index).min(*variant_index);
+            *max_index = (*max_index).max(*variant_index);
+            for haplotype in 0..haplotypes.len() {
+                let numerators_denominators = haplotypes[haplotype];
+                let allele_fraction = (numerators_denominators.0 / numerators_denominators.1);
+                let cluster_value = allele_fraction
+                    .max(0.001)
+                    .min(0.999);
+                total_change +=
+                    (cluster_value - cluster_centers[haplotype][*variant_index]).abs();
+                
+                cluster_centers[haplotype][*variant_index] = cluster_value;
+
+            }
+        }
+    }
+    total_change
+}
+
+// molecules is vec of molecules each a vec of alleles
+// cluster centers is vec of haplotype clusters  by variant loci
+// posteriors (return value) is molecules by clusters to posterior probability
+fn expectation(
+    molecules: &Vec<Vec<Allele>>,
+    cluster_centers: &Vec<Vec<f32>>,
+    posteriors: &mut Vec<Vec<f32>>,
+
+) -> (bool, f32, f32) {
+    let mut delta = 0.0;
+    //let mut posteriors: Vec<Vec<f32>> = Vec::new();
+    let mut any_different = false;
+    let mut log_likelihood: f32 = 0.0;
+    for (moldex, molecule) in molecules.iter().enumerate() {
+        let mut log_probs: Vec<f32> = Vec::new(); // for each haplotype
+        for haplotype in 0..cluster_centers.len() {
+            let mut log_prob = 0.0; // log(0) = probability 1
+            for allele in molecule.iter() {
+                let lp;
+                if allele.allele {
+                    // alt allele
+                    lp = cluster_centers[haplotype][allele.index].ln();
+                    log_prob += cluster_centers[haplotype][allele.index].ln(); // adding in log space, multiplying in probability space
+                } else {
+                    lp = (1.0 - cluster_centers[haplotype][allele.index]).ln();
+                    log_prob += (1.0 - cluster_centers[haplotype][allele.index]).ln();
+                }
+            }
+            
+            log_probs.push(log_prob);
+        }
+        let bayes_log_denom = log_sum_exp(&log_probs);
+        log_likelihood += bayes_log_denom;
+        let mut mol_posteriors: Vec<f32> = Vec::new();
+
+        for log_prob in log_probs {
+            mol_posteriors.push((log_prob - bayes_log_denom).exp());
+        }
+
+        for haplotype in 0..cluster_centers.len() {
+            if mol_posteriors[haplotype] != mol_posteriors[0] {
+                any_different = true;
+            }
+            //error!("previous posterior moldex {} hap {} {} to {} for a difference of {}", 
+            //    moldex, haplotype, posteriors[moldex][haplotype], mol_posteriors[haplotype], 
+            //    (posteriors[moldex][haplotype] - mol_posteriors[haplotype]).abs());
+            delta += (posteriors[moldex][haplotype] - mol_posteriors[haplotype]).abs();
+            posteriors[moldex][haplotype] = mol_posteriors[haplotype];
+        }
+
+        //posteriors.push(mol_posteriors);
+
+         
+    }
+    (!any_different, log_likelihood, delta)
+}
+
+fn log_sum_exp(p: &Vec<f32>) -> f32 {
+    let max_p: f32 = p.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let sum_rst: f32 = p.iter().map(|x| (x - max_p).exp()).sum();
+    max_p + sum_rst.ln()
+}
 fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     debug!("thread {} chrom {}end", data.index, data.chrom);
 
@@ -231,24 +362,27 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         let mut min_index: usize = 0;
         let mut max_index: usize = 0;
         let mut last_cluster_center_delta = cluster_center_delta;
-        error!("next window {}-{}", window_start, window_end);
+        let mut last_posterior_delta = 0.0;
+        info!("next window {}-{}", window_start, window_end);
+        let mut posteriors: Vec<Vec<f32>> = Vec::new();
+        for moldex in molecules.iter() {
+            let mut post: Vec<f32> = Vec::new();
+            for hap in cluster_centers.iter() {
+                post.push(0.0);
+            }
+            posteriors.push(post);
+        }
         while cluster_center_delta > 0.01 {
-            let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
-            error!("posteriors {:?}",posteriors);
+            
+            let (breaking_point, _log_likelihood, posterior_delta) = expectation(&molecules, &cluster_centers, &mut posteriors);
+
             if in_phaseblock && breaking_point {
-                //println!(
-                //    "BREAKING due to no posteriors differing... window {}-{}",
-                //    window_start, window_end
-                //);
                 in_phaseblock = false;
-                while cluster_centers[0][last_attempted_index] == 0.5 {
+                while cluster_centers[0][last_attempted_index] == 0.5 && 
+                    vcf_info.variant_positions[last_attempted_index] > window_start {
                     last_attempted_index -= 1;
                 }
                 
-                //let cut_blocks = test_long_switch(phase_block_start, last_attempted_index, &mut cluster_centers, &vcf_info, &mut vcf_reader, &data);
-                //for phase_block in cut_blocks {
-                //    phase_blocks.push(phase_block);
-                //}
                 putative_phase_blocks.push(PhaseBlock{
                     start_index: phase_block_start,
                     start_position: vcf_info.variant_positions[phase_block_start],
@@ -256,17 +390,10 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     end_position: vcf_info.variant_positions[last_attempted_index]
                 });
                 
-                //println!(
-                //    "PHASE BLOCK ENDING {}-{}, {}-{} length {}",
-                //    phase_block_start,
-                //    last_attempted_index,
-                //    vcf_info.variant_positions[phase_block_start],
-                //    vcf_info.variant_positions[last_attempted_index],
-                //    vcf_info.variant_positions[last_attempted_index] - vcf_info.variant_positions[phase_block_start]
-                //);
                 phase_block_start = last_attempted_index + 1;
+                last_window_start = Some(window_start);
                 window_start = vcf_info.variant_positions[phase_block_start];
-                //eprintln!("reseting window start to {}", window_start);
+                eprintln!("in phaseblock but hit breakpoint, reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
                 let seed = [data.seed; 32];
                 let mut rng: StdRng = SeedableRng::from_seed(seed);
@@ -277,9 +404,10 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 
                 continue 'outer;
             } else if !in_phaseblock && breaking_point {
+                eprintln!("not in a phaseblock, but hit breaking point. resetting window");
                 if first_var_index == usize::MAX { // there were no variants
                     // we need to find a new starting point
-                    
+                    eprintln!("\tthere were no variants, scanning forward for window start");
                     for (index, position) in vcf_info.variant_positions.iter().enumerate() {
                         phase_block_start = index;
                         if *position > window_end {
@@ -288,16 +416,29 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     }
                     //eprintln!("unable to start phaseblock, resetting");
                 } else {
+                    if last_var_index >= vcf_info.variant_positions.len() {
+                        eprintln!("\tthere were variants and last_var_index was {} at {}, next is {} at {} and current window is {}-{}",
+                        last_var_index, vcf_info.variant_positions[last_var_index], 
+                        last_var_index + 1, vcf_info.variant_positions[last_var_index + 1], window_start, window_end);
+                    }
+                    
                     //eprintln!("unphased variants {}-{} positions {}-{}", first_var_index, last_var_index,
                     //vcf_info.variant_positions[first_var_index], vcf_info.variant_positions[last_var_index]);
-                    phase_block_start = last_var_index + 1;
+                    for (index, position) in vcf_info.variant_positions.iter().enumerate() {
+                        phase_block_start = index;
+                        if *position > window_start {
+                            break;
+                        }
+                    }
+                    //phase_block_start = last_var_index + 1;
                 }
                 
                 if phase_block_start >= vcf_info.variant_positions.len() {
                     break 'outer;
                 }
+                last_window_start = Some(window_start);
                 window_start = vcf_info.variant_positions[phase_block_start];
-                //eprintln!("reseting window start to {}", window_start);
+                eprintln!("reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
                 let seed = [data.seed; 32];
                 let mut rng: StdRng = SeedableRng::from_seed(seed);
@@ -312,19 +453,27 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 &posteriors,
                 &mut cluster_centers,
                 &mut min_index,
-                &mut max_index,
-                true
+                &mut max_index
             );
+            /*
             if iteration != 0 && cluster_center_delta > last_cluster_center_delta {
-                error!("cluster center delta not decreasing! {} to {}, position {}-{}", last_cluster_center_delta, cluster_center_delta, window_start, window_end);
-                error!("poseriors {:?}", posteriors);
-                let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
-                error!("and after another maximization cluster center delta was {}", cluster_center_delta);
+                error!("cluster center delta not decreasing! {} to {}, position {}-{}, posterior delta {} to {}", 
+                    last_cluster_center_delta, cluster_center_delta, window_start, window_end, last_posterior_delta, posterior_delta);
+                //error!("poseriors {:?}", posteriors);
+                //let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
+                //error!("and after another maximization cluster center delta was {}", cluster_center_delta);
 
             } else if iteration != 0 && cluster_center_delta == last_cluster_center_delta {
                 error!("cluster center delta not decreasing! {} to {}, position {}-{}", last_cluster_center_delta, cluster_center_delta, window_start, window_end);
             }
+            if iteration != 0 && posterior_delta > last_posterior_delta {
+                error!("posterior delta not decreasing! cluster center delta {} to {}, position {}-{}, posterior delta {} to {}", 
+                    last_cluster_center_delta, cluster_center_delta, window_start, window_end, last_posterior_delta, posterior_delta);
+                //error!("poseriors {:?}", posteriors);
+            }
+            */
             last_cluster_center_delta = cluster_center_delta;
+            last_posterior_delta = posterior_delta;
             if max_index != 0 {
                 last_attempted_index = max_index;
                 if !in_phaseblock {
@@ -335,30 +484,11 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
 
             iteration += 1;
         }
-        //println!(
-        //    "converged in {} iterations, min {} max {}",
-        //    iteration, min_index, max_index
-        //);
-        /*
-        for haplotype in 0..cluster_centers.len() {
-            print!("haplotype {}\t", haplotype);
-            for variant in min_index..max_index {
-                print!(
-                    "var{},{}:{} | ",
-                    variant,
-                    vcf_info.variant_positions[variant],
-                    cluster_centers[haplotype][variant]
-                );
-            }
-            println!();
-        }
-        */
+        
         window_start += data.phasing_window / 4;
         window_start = window_start.min(vcf_info.final_position as usize);
-        //eprintln!("moving window start to {}", window_start);
         window_end += data.phasing_window / 4;
         window_end = window_end.min(vcf_info.final_position as usize);
-        //break;
     }
     debug!("DONE phasing long reads! thread {} chrom {}", data.index, data.chrom);
     if in_phaseblock {
@@ -376,13 +506,6 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         }
     }
     
-    //phase_blocks.push(PhaseBlock {
-    //    start_index: phase_block_start,
-    //    start_position: vcf_info.variant_positions[phase_block_start],
-    //    end_index: last_attempted_index,
-    //    end_position: vcf_info.variant_positions[last_attempted_index],
-    //});
-
     debug!("DONE long switch test! thread {} chrom {}", data.index, data.chrom);
     let mut total_gap_length = 0;
     for (id, phase_block) in phase_blocks.iter().enumerate() {
@@ -463,8 +586,15 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
         let (molecules, first_var_index, last_var_index) = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
         for pairing in pairings.iter() {
             swap(cluster_centers, breakpoint, &pairing, 50);
-            
-            let (_break, _posteriors, log_likelihood) = expectation(&molecules, &cluster_centers, false);
+            let mut posteriors: Vec<Vec<f32>> = Vec::new();
+            for moldex in molecules.iter() {
+                let mut post: Vec<f32> = Vec::new();
+                for hap in cluster_centers.iter() {
+                    post.push(0.0);
+                }
+                posteriors.push(post);
+            }
+            let (_break, log_likelihood, post_delta) = expectation(&molecules, &cluster_centers, &mut posteriors);
             log_likelihoods.push(log_likelihood + log_prior);
             swap(cluster_centers, breakpoint, &pairing, 50); // reversing the swap
         }
@@ -489,7 +619,15 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
                 let (molecules, first_var_index, last_var_index)  = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
             trace!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, positions {}-{}, posterior {}, breakpoint {} position {} with {} molecules", 
                 start_index, end_index, start_position, end_position, posterior, breakpoint, position, molecules.len());
-            let (_break, posteriors, log_likelihood) = expectation(&molecules, &cluster_centers, false);
+            let mut posteriors: Vec<Vec<f32>> = Vec::new();
+            for moldex in molecules.iter() {
+                let mut post: Vec<f32> = Vec::new();
+                for hap in cluster_centers.iter() {
+                    post.push(0.0);
+                }
+                posteriors.push(post);
+            }
+            let (_break, log_likelihood, post_delta) = expectation(&molecules, &cluster_centers, &mut posteriors);
             //eprintln!("mol posteriors {:?}", posteriors);
 
             trace!("hap1 {:?}", &cluster_centers[0][breakpoint..(breakpoint+10)]);
@@ -1086,142 +1224,7 @@ fn infer_genotype(cluster_centers: &Vec<Vec<f32>>, index: usize) -> Vec<Genotype
     genotypes
 }
 
-fn maximization(
-    molecules: &Vec<Vec<Allele>>,
-    posteriors: &Vec<Vec<f32>>,
-    cluster_centers: &mut Vec<Vec<f32>>,
-    min_index: &mut usize,
-    max_index: &mut usize,
-    debug: bool
-) -> f32 {
-    error!("in maximization");
-    let mut updates: HashMap<usize, Vec<(f32, f32)>> = HashMap::new(); // variant index to vec across
-    let mut variant_molecule_count: HashMap<usize, usize> = HashMap::new();
-    *min_index = std::usize::MAX;
-    *max_index = 0;
-    // haplotype clusters to a tuple of (numerator, denominator)
-    for molecule_index in 0..molecules.len() {
-        // if molecule does not support any haplotype over another, dont use it in maximization
-        let mut different = false;
-        for haplotype in 0..cluster_centers.len() {
-            //if (posteriors[molecule_index][haplotype] - posteriors[molecule_index][0]).abs() < 0.01 { // but why would this happen?
-            if posteriors[molecule_index][haplotype] == posteriors[molecule_index][0] {
-                different = true;
-            }
-        }
-        //if !different {
-            //println!("debug, molecule does not support any haplotype over another");
-        //    continue;
-        //}
-        for allele in &molecules[molecule_index] {
-            let variant_index = allele.index;
-            let alt = allele.allele;
-            let count = variant_molecule_count.entry(variant_index).or_insert(0);
-            *count += 1;
-            for haplotype in 0..cluster_centers.len() {
-                let posterior = posteriors[molecule_index][haplotype];
-                let numerators_denominators = updates
-                    .entry(variant_index)
-                    .or_insert(vec![(0.0, 0.0); cluster_centers.len()]);
-                if alt {
-                    numerators_denominators[haplotype].0 += posterior;
-                    numerators_denominators[haplotype].1 += posterior;
-                } else {
-                    numerators_denominators[haplotype].1 += posterior;
-                }
-            }
-        }
-    }
-    let mut updated_variants = 0;
-    let mut total_change = 0.0;
-    for (variant_index, haplotypes) in updates.iter() {
-        if variant_molecule_count.get(variant_index).unwrap() > &3 { // TODO dont hard code, make parameters
-            updated_variants += 1;
-            //TODO Dont hard code stuff
-            *min_index = (*min_index).min(*variant_index);
-            *max_index = (*max_index).max(*variant_index);
-            for haplotype in 0..haplotypes.len() {
-                let numerators_denominators = haplotypes[haplotype];
-                let allele_fraction = (numerators_denominators.0 / numerators_denominators.1);
-                let cluster_value = allele_fraction
-                    .max(0.001)
-                    .min(0.999);
-                total_change +=
-                    (cluster_value - cluster_centers[haplotype][*variant_index]).abs();
-                if debug {
-                    error!("variant index {}, haplotype {}, numerator {} denom {}, previous {} new val {} after capping vals {} delta {}, total change thus far {}",
-                        variant_index, haplotype, numerators_denominators.0, numerators_denominators.1,
-                        cluster_centers[haplotype][*variant_index], allele_fraction, cluster_value, (cluster_value - cluster_centers[haplotype][*variant_index]).abs(),total_change);
-                    }
-                cluster_centers[haplotype][*variant_index] = cluster_value;
 
-            }
-        }
-    }
-    if debug {
-        error!("updated variants {}",updated_variants);
-    }
-    total_change
-}
-
-// molecules is vec of molecules each a vec of alleles
-// cluster centers is vec of haplotype clusters  by variant loci
-// posteriors (return value) is molecules by clusters to posterior probability
-fn expectation(
-    molecules: &Vec<Vec<Allele>>,
-    cluster_centers: &Vec<Vec<f32>>,
-    debug: bool,
-) -> (bool, Vec<Vec<f32>>, f32) {
-    let mut posteriors: Vec<Vec<f32>> = Vec::new();
-    let mut any_different = false;
-    let mut log_likelihood: f32 = 0.0;
-    error!("in expectation");
-    for (moldex, molecule) in molecules.iter().enumerate() {
-        let mut log_probs: Vec<f32> = Vec::new(); // for each haplotype
-        for haplotype in 0..cluster_centers.len() {
-            let mut log_prob = 0.0; // log(0) = probability 1
-            for allele in molecule.iter() {
-                let lp;
-                if allele.allele {
-                    // alt allele
-                    lp = cluster_centers[haplotype][allele.index].ln();
-                    log_prob += cluster_centers[haplotype][allele.index].ln(); // adding in log space, multiplying in probability space
-                } else {
-                    lp = (1.0 - cluster_centers[haplotype][allele.index]).ln();
-                    log_prob += (1.0 - cluster_centers[haplotype][allele.index]).ln();
-                }
-                if debug {
-                    error!("mol {}, hap {}, variant index {}, allele {}, cluster center {} adding {} to log_prob",moldex, haplotype, allele.index, 
-                    allele.allele, cluster_centers[haplotype][allele.index],lp);
-                }
-            }
-            
-            log_probs.push(log_prob);
-        }
-        let bayes_log_denom = log_sum_exp(&log_probs);
-        log_likelihood += bayes_log_denom;
-        let mut mol_posteriors: Vec<f32> = Vec::new();
-
-        for log_prob in log_probs {
-            mol_posteriors.push((log_prob - bayes_log_denom).exp());
-        }
-
-        for haplotype in 0..cluster_centers.len() {
-            if mol_posteriors[haplotype] != mol_posteriors[0] {
-                any_different = true;
-            }
-        }
-
-        posteriors.push(mol_posteriors);
-    }
-    (!any_different, posteriors, log_likelihood)
-}
-
-fn log_sum_exp(p: &Vec<f32>) -> f32 {
-    let max_p: f32 = p.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let sum_rst: f32 = p.iter().map(|x| (x - max_p).exp()).sum();
-    max_p + sum_rst.ln()
-}
 
 enum READ_TYPE {
     HIFI, HIC,
@@ -1286,9 +1289,6 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
     }
     let mut to_return: Vec<Vec<Allele>> = Vec::new();
     for (index, (_read_name, alleles)) in molecules.iter().enumerate() {
-        if index > 5 {
-            continue; // TODO REMOVE THIS IS FOR DEBUG
-        }
         if alleles.len() < 2 {
             continue;
         }
