@@ -85,13 +85,13 @@ fn _main() -> Result<(), Error> {
         .expect(&format!("error opening fasta index: {}", fai))
         .sequences();
     let mut chroms: Vec<String> = Vec::new();
-    //chroms.push("chr20".to_string());
+    chroms.push("20".to_string());
     let mut chrom_lengths: Vec<u64> = Vec::new();
-    //chrom_lengths.push(63025520);
-    for chrom in fa_index_iter {
-        chroms.push(chrom.name.to_string());
-        chrom_lengths.push(chrom.len);
-    }
+    chrom_lengths.push(63025520);
+    //for chrom in fa_index_iter {
+    //   chroms.push(chrom.name.to_string());
+    //    chrom_lengths.push(chrom.len);
+    //}
     
     //let vcf_reader = bcf::IndexedReader::from_path(params.vcf.to_string())?;
     let mut chunks: Vec<ThreadData> = Vec::new();
