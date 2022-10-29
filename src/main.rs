@@ -219,6 +219,9 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     vcf_info.variant_positions[last_attempted_index] - vcf_info.variant_positions[phase_block_start]
                 );
                 phase_block_start = last_attempted_index + 1;
+                if phase_block_start >= vcf_info.variant_positions.len() {
+                    break 'outer;
+                }
                 window_start = vcf_info.variant_positions[phase_block_start];
                 //eprintln!("reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
@@ -246,7 +249,9 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     //vcf_info.variant_positions[first_var_index], vcf_info.variant_positions[last_var_index]);
                     phase_block_start = last_var_index + 1;
                 }
-                
+                if phase_block_start >= vcf_info.variant_positions.len() {
+                    break 'outer;
+                }
                 window_start = vcf_info.variant_positions[phase_block_start];
                 //eprintln!("reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
