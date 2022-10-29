@@ -441,7 +441,7 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
         }  ***/
     }
     if to_return.len() == 0 {
-        if vcf_info.variant_positions.len() > 0 {
+        if vcf_info.variant_positions.len() > 0 && start_index < vcf_info.variant_positions.len() {
             to_return.push(PhaseBlock{
                 start_index: start_index,
                 start_position: vcf_info.variant_positions[start_index],
