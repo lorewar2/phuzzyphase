@@ -419,8 +419,8 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
             let (_break, posteriors, log_likelihood) = expectation(&molecules, &cluster_centers);
             //eprintln!("mol posteriors {:?}", posteriors);
 
-            eprintln!("hap1 {:?}", &cluster_centers[0][breakpoint..(breakpoint+10)]);
-            eprintln!("hap2 {:?}", &cluster_centers[1][breakpoint..(breakpoint+10)]);
+            //eprintln!("hap1 {:?}", &cluster_centers[0][breakpoint..(breakpoint+10)]);
+            //eprintln!("hap2 {:?}", &cluster_centers[1][breakpoint..(breakpoint+10)]);
         
         }
         /*** else {
