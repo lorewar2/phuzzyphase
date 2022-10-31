@@ -85,7 +85,7 @@ fn _main() -> Result<(), Error> {
         .expect(&format!("error opening fasta index: {}", fai))
         .sequences();
     let mut chroms: Vec<String> = Vec::new();
-    chroms.push("20".to_string());
+    chroms.push("chr20".to_string());
     let mut chrom_lengths: Vec<u64> = Vec::new();
     chrom_lengths.push(63025520);
     //for chrom in fa_index_iter {
