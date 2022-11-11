@@ -89,3 +89,9 @@ args:
         takes_value: true
         default_value: "0.9999"
         help: confidence threshold when testing potential break points for long switches
+    - region:
+        long: region
+        short: r
+        required: false
+        takes_value: true
+        help: region in the form of chr1:start-stop 

@@ -1,4 +1,5 @@
 #[macro_use]
+
 extern crate clap;
 extern crate bio;
 extern crate hashbrown;
@@ -95,19 +96,25 @@ fn _main() -> Result<(), Error> {
         .expect(&format!("error opening fasta index: {}", fai))
         .sequences();
     let mut chroms: Vec<String> = Vec::new();
-    chroms.push("20".to_string()); // TODO remove
-    let mut chrom_lengths: Vec<u64> = Vec::new();
-    chrom_lengths.push(64444167); // TODO remove
-    //for chrom in fa_index_iter { // TODO uncomment
-    //    chroms.push(chrom.name.to_string());
-    //    chrom_lengths.push(chrom.len);
-    //}
     
+    let mut starts: Vec<usize> = Vec::new();
+    let mut ends: Vec<usize> = Vec::new();
+    if let Some(chrom) = params.chrom {
+        chroms.push(chrom);
+        starts.push(params.start.expect("could not unwrap region start"));
+        ends.push(params.end.expect("could not unwrap region end"));
+    } else {
+        for chrom in fa_index_iter {
+            chroms.push(chrom.name.to_string());
+            starts.push(0);
+            ends.push(chrom.len as usize);
+        }
+    }
+   
     //let vcf_reader = bcf::IndexedReader::from_path(params.vcf.to_string())?;
     let mut chunks: Vec<ThreadData> = Vec::new();
     for (i, chrom) in chroms.iter().enumerate() {
         //if chrom.chars().count() > 5 { continue; }
-        debug!("chrom {}end",chrom);
         let data = ThreadData {
             index: i,
             long_read_bam: match &params.long_read_bam {
@@ -123,7 +130,8 @@ fn _main() -> Result<(), Error> {
             vcf: params.vcf.to_string(),
             min_mapq: params.min_mapq,
             min_base_qual: params.min_base_qual,
-            chrom_length: chrom_lengths[i],
+            start: starts[i],
+            end: ends[i],
             window: params.window,
             output: params.output.to_string(),
             vcf_out: format!("{}/chrom_{}.vcf.gz", params.output, sanitize_filename::sanitize(chrom)),
@@ -150,7 +158,7 @@ fn _main() -> Result<(), Error> {
     //   pool.spawn(move || phase_chunk(&data).expect("thread failed"));
     //}
     let pool = ThreadPool::new(params.threads);
-    let barrier = Arc::new(Barrier::new(params.threads + 1));
+    let barrier = Arc::new(Barrier::new(chunks.len() + 1));
     let final_output = format!("{}/phasstphase.vcf.gz",params.output);
     let mut cmd: Vec<String> = Vec::new();
     cmd.push("concat".to_string());
@@ -159,10 +167,15 @@ fn _main() -> Result<(), Error> {
     
     for data in chunks {
         cmd.push(format!("{}/phased_chrom_{}.vcf.gz", data.output, data.chrom));
-        pool.execute(move|| phase_chunk(&data).expect("thread failed"));
+        let barrier = barrier.clone();
+        pool.execute(move|| {
+            phase_chunk(&data).expect("thread failed");
+            barrier.wait();
+        }
+        );
     }
     barrier.wait();
-   
+    println!("after barrier");
     let result = Command::new("bcftools")
         .args(&cmd)
         .status()
@@ -235,7 +248,7 @@ fn maximization(
             *max_index = (*max_index).max(*variant_index);
             for haplotype in 0..haplotypes.len() {
                 let numerators_denominators = haplotypes[haplotype];
-                let allele_fraction = (numerators_denominators.0 / numerators_denominators.1);
+                let allele_fraction = numerators_denominators.0 / numerators_denominators.1;
                 let cluster_value = allele_fraction
                     .max(0.001)
                     .min(0.999);
@@ -328,8 +341,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         .expect("can't get chrom rid, make sure vcf and bam and fasta contigs match!");
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let mut cluster_centers = init_cluster_centers(vcf_info.num_variants, &data);
-    let debug_bump = 0;
-    let mut window_start: usize = debug_bump;
+    let mut window_start: usize = data.start;
     let mut window_end: usize = window_start + data.phasing_window;
     //let mut position_to_index: HashMap<usize, usize> = HashMap::new();
     //let mut position_so_far: usize = 0;
@@ -339,7 +351,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     let mut last_attempted_index: usize = 0;
     let mut in_phaseblock = false;
     let mut last_window_start: Option<usize> = None;
-    'outer: while (window_start as u64) < data.chrom_length
+    'outer: while window_start < data.end
         && window_start < vcf_info.final_position as usize
     {
         if let Some(last_start) = last_window_start {
@@ -492,8 +504,8 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         window_start = window_start.min(vcf_info.final_position as usize);
         window_end += data.phasing_window / 4;
         window_end = window_end.min(vcf_info.final_position as usize);
-    }
-    debug!("DONE phasing long reads! thread {} chrom {}", data.index, data.chrom);
+    } // end 'outer loop
+    println!("DONE phasing long reads! thread {} chrom {}", data.index, data.chrom);
     if in_phaseblock {
         putative_phase_blocks.push(PhaseBlock{
             start_index: phase_block_start,
@@ -529,7 +541,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         );
     }
     if phase_blocks.len() > 0 {
-        info!("and final gap of {}", (data.chrom_length as usize) - phase_blocks[phase_blocks.len() - 1].end_position);
+        info!("and final gap of {}", data.end - phase_blocks[phase_blocks.len() - 1].end_position);
     }
     
     info!("with total gap length of {}", total_gap_length);
@@ -552,9 +564,9 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     }
 
     let new_phase_blocks = phase_phaseblocks(data, &mut cluster_centers, &phase_blocks);
-    debug!("DONE hic phasing! thread {} chrom {}", data.index, data.chrom);
+    println!("DONE hic phasing! thread {} chrom {}", data.index, data.chrom);
     output_phased_vcf(data, cluster_centers, phase_blocks);
-    debug!("thread {} chrom {}finished", data.index, data.chrom);
+    println!("thread {} chrom {}finished", data.index, data.chrom);
     Ok(())
 }
 
@@ -694,7 +706,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         .expect("cant get chrom rid");
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let mut phase_block_ids: HashMap<usize,usize> = HashMap::new();
-    debug!("entering hic phasing with {} phase blocks", phase_blocks.len());
+    println!("entering hic phasing with {} phase blocks", phase_blocks.len());
     for (id, phase_block) in phase_blocks.iter().enumerate() {
         //eprintln!("phase block {} from {}-{}",id, phase_block.start_index, phase_block.end_index);
         for i in phase_block.start_index..(phase_block.end_index+1) {
@@ -703,10 +715,10 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
     }
     vcf_reader
-        .fetch(chrom, 0, None)
+        .fetch(chrom, data.start as u64, Some(data.end as u64))
         .expect("some actual error");
     let (hic_reads, _, _) = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
-    info!("{} hic reads hitting > 1 variant", hic_reads.len());
+    println!("{} hic reads hitting > 1 variant", hic_reads.len());
     // let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
     // ok that is a map from (phase_block_id1, phase_block_id2) to a map from (pb1_hap, pb2_hap) to counts
     let mut allele_pair_counts: HashMap<(usize, usize), [u64; 4]> = HashMap::new();
@@ -777,7 +789,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             
         }
     }
-    debug!("DONE building allele pair counts (size {})! thread {} chrom {}", allele_pair_counts.len(), data.index, data.chrom);
+    println!("DONE building allele pair counts (size {})! thread {} chrom {}", allele_pair_counts.len(), data.index, data.chrom);
     
     let mut phase_block_pair_phasing_log_likelihoods: HashMap<(usize, usize), HashMap<usize, f64>> = HashMap::new();
     // this is a map from (phase_block_id1, phase_block_id2) 
@@ -823,7 +835,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             //eprintln!("\t\t\tlikelihood update {}, in log {}, total log {}",multinomial_distribution.pmf(counts), multinomial_distribution.ln_pmf(counts), log_likelihood);
         }
     }
-    debug!("DONE creating phase block pair log likelihoods (size {})! thread {} chrom {}", phase_block_pair_phasing_log_likelihoods.len(), data.index, data.chrom);
+    println!("DONE creating phase block pair log likelihoods (size {})! thread {} chrom {}", phase_block_pair_phasing_log_likelihoods.len(), data.index, data.chrom);
 
     let mut union_find: UnionFind<usize> = UnionFind::new(phase_blocks.len());
     // now for each phase block pair, we will normalize the pairing marginal log likelihoods to sum to 1 giving us
@@ -848,7 +860,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                 max_index = i;
             }
         }
-        debug!("after normalizing, phase blocks {} and {} with pairing {} and posterior {}", phase_block1, phase_block2, max_index, max);
+        println!("after normalizing, phase blocks {} and {} with pairing {} and posterior {}", phase_block1, phase_block2, max_index, max);
         if max > data.hic_phasing_posterior_threshold {
             union_find.union(*phase_block1, *phase_block2);
         }
@@ -904,7 +916,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     let mut count_vec: Vec<(&usize, &usize)> = problem_phaseblocks.iter().collect();
     count_vec.sort_by(|a, b| b.1.cmp(a.1));
 
-    debug!("DONE checking triangles (bad triangles {:?})! thread {}, chrom {}",count_vec, data.index, data.chrom);
+    println!("DONE checking triangles (bad triangles {:?})! thread {}, chrom {}",count_vec, data.index, data.chrom);
     //debug!("problem phaseblocks ruining triangles {:?}", count_vec);
 
 
@@ -926,19 +938,19 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         sizes.push(total_length);
         total += total_length;
     }
-    debug!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
+    println!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
     sizes.sort_by(|a, b| b.cmp(a));
-    info!("{:?}", sizes);
-    info!("total length of phased region for chrom {} is {} vs chrom length of {}", data.chrom, total, data.chrom_length);
+    println!("{:?}", sizes);
+    println!("total length of phased region for chrom {} is {} vs chrom region end {}", data.chrom, total, data.end);
     let mut so_far = 0;
     for size in sizes {
         so_far += size;
         if so_far > total/2 {
-            info!("After hic phasing the N50 phase blocks for chrom {} is {}", data.chrom, size);
+            println!("After hic phasing the N50 phase blocks for chrom {} is {}", data.chrom, size);
             break;
         }
     }
-    
+    println!("done with hic")
 }
 
 fn get_posterior(marriage_log_likelihoods: &HashMap<usize,f64>) -> (usize, f32) {
@@ -1179,6 +1191,8 @@ fn output_phased_vcf(
     let header_view = vcf_reader.header();
     let mut new_header = bcf::header::Header::from_template(header_view);
     new_header.push_record(br#"##FORMAT=<ID=PS,Number=1,Type=Integer,Description="phase set id">"#);
+    let cluster_center_string = format!(r#"##FORMAT=<ID=CC,Number={},Type=Integer,Description=\"phasstphase cluster center values\">"#, cluster_centers.len());
+    new_header.push_record(&cluster_center_string.as_bytes());
     let mut vcf_writer = bcf::Writer::from_path(
         format!("{}/phased_chrom_{}.vcf.gz", data.output, sanitize_filename::sanitize(&data.chrom)),
         &new_header,
@@ -1386,7 +1400,8 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
         let mut vcf_writer =
             bcf::Writer::from_path(data.vcf_out.to_string(), &new_header, false, Format::Vcf).expect("cant open vcf writer");
         let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes()).expect("could not read vcf header");
-        match vcf_reader.fetch(chrom, 0, None) {
+        println!("fetching {}:{}-{}",chrom, data.start, data.end);
+        match vcf_reader.fetch(chrom, data.start as u64, Some(data.end as u64)) {
             Ok(_) => {
                 let mut total = 0;
                 let mut hets = 0;
@@ -1419,14 +1434,12 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
                             &mut hic_bam_reader,
                             &mut fasta,
                             data.window,
-                            data.chrom_length,
+                            data.start,
+                            data.end,
                             &mut vcf_writer,
                             &mut new_rec,
                         );
                     }
-                    //if hets > 2000 {
-                    //    break;
-                    //} //TODO remove, for small example
                 }
                 println!(
                     "done, saw {} records of which {} were hets in chrom {}",
@@ -1626,11 +1639,14 @@ fn get_variant_assignments<'a>(
     hic_reads: &mut Option<bam::IndexedReader>,
     fasta: &mut fasta::IndexedReader<std::fs::File>,
     window: usize,
-    chrom_length: u64,
+    start: usize,
+    end: usize,
     vcf_writer: &mut bcf::Writer,
     vcf_record: &mut bcf::record::Record,
 ) {
-    if (pos + window) as u64 > chrom_length {
+    println!("pos {} window {} start {}",pos, window, start);
+    //if (pos + window) > end {
+    if pos > end {
         return;
     }
     match long_reads {
@@ -1785,7 +1801,8 @@ struct ThreadData {
     hic_bam: Option<String>,
     fasta: String,
     chrom: String,
-    chrom_length: u64,
+    start: usize,
+    end: usize,
     vcf: String,
     min_mapq: u8,
     min_base_qual: u8,
@@ -1816,6 +1833,9 @@ struct Params {
     phasing_window: usize,
     hic_phasing_posterior_threshold: f32,
     long_switch_threshold: f32,
+    chrom: Option<String>,
+    start: Option<usize>,
+    end: Option<usize>,
 }
 
 fn load_params() -> Params {
@@ -1867,6 +1887,24 @@ fn load_params() -> Params {
     let long_switch_threshold = long_switch_threshold.to_string().parse::<f32>().unwrap();
 
     let vcf = params.value_of("vcf").unwrap();
+    let region = params.value_of("region");
+    let chrom;
+    let start;
+    let end;
+    if let Some(region) = region {
+        let toks = region.split(":").collect::<Vec<&str>>();
+        chrom = Some(toks[0].to_string());
+        let tmp = toks[1].to_string();
+        let toks2 = tmp.split("-").collect::<Vec<&str>>();
+        let tmp = toks2[0].to_string();
+        start = Some(tmp.parse::<usize>().expect("couldn't parse region"));
+        let tmp = toks2[1].to_string();
+        end = Some(tmp.parse::<usize>().expect("couldn't parse region"));
+    } else {
+        chrom = None;
+        start = None;
+        end = None;
+    }
 
     Params {
         output: output.to_string(),
@@ -1883,5 +1921,8 @@ fn load_params() -> Params {
         phasing_window: phasing_window,
         hic_phasing_posterior_threshold: hic_phasing_posterior_threshold,
         long_switch_threshold: long_switch_threshold,
+        chrom: chrom,
+        start: start,
+        end: end,
     }
 }
