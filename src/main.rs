@@ -14,6 +14,7 @@ extern crate env_logger;
 
 use log::{debug, error, log_enabled, info, trace, Level};
 
+use std::sync::mpsc::channel;
 
 
 use rand::rngs::StdRng;
@@ -21,6 +22,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use std::process::Command;
 use std::{thread, time};
+use std::str;
 use threadpool::ThreadPool;
 use std::sync::{Arc, Barrier};
 
@@ -54,10 +56,10 @@ use clap::App;
 
 const K: usize = 6; // kmer match length
 const W: usize = 20; // Window size for creating the band
-const MATCH: i32 = 1; // Match score
-const MISMATCH: i32 = -5; // Mismatch score
-const GAP_OPEN: i32 = -5; // Gap open score
-const GAP_EXTEND: i32 = -1; // Gap extend score
+const MATCH: i32 = 2; // Match score
+const MISMATCH: i32 = -4; // Mismatch score
+const GAP_OPEN: i32 = -4; // Gap open score
+const GAP_EXTEND: i32 = -2; // Gap extend score
 
 fn main() {
     env_logger::init();
@@ -135,7 +137,9 @@ fn _main() -> Result<(), Error> {
             window: params.window,
             output: params.output.to_string(),
             vcf_out: format!("{}/chrom_{}.vcf.gz", params.output, sanitize_filename::sanitize(chrom)),
+            phased_vcf_out: format!("{}/phased_chrom_{}.vcf.gz", params.output, sanitize_filename::sanitize(chrom)),
             vcf_out_done: format!("{}/chrom_{}.vcf.done", params.output, sanitize_filename::sanitize(chrom)),
+            phased_vcf_done: format!("{}/phased_chrom_{}.vcf.done", params.output, sanitize_filename::sanitize(chrom)),
             phasing_window: params.phasing_window,
             seed: params.seed,
             ploidy: params.ploidy,
@@ -158,23 +162,24 @@ fn _main() -> Result<(), Error> {
     //   pool.spawn(move || phase_chunk(&data).expect("thread failed"));
     //}
     let pool = ThreadPool::new(params.threads);
-    let barrier = Arc::new(Barrier::new(chunks.len() + 1));
+    let (tx, rx) = channel();
     let final_output = format!("{}/phasstphase.vcf.gz",params.output);
     let mut cmd: Vec<String> = Vec::new();
     cmd.push("concat".to_string());
     cmd.push("-o".to_string());
     cmd.push(final_output.to_string());
-    
+    let jobs = chunks.len();
     for data in chunks {
         cmd.push(format!("{}/phased_chrom_{}.vcf.gz", data.output, data.chrom));
-        let barrier = barrier.clone();
+        let tx = tx.clone();
         pool.execute(move|| {
             phase_chunk(&data).expect("thread failed");
-            barrier.wait();
+            tx.send(1).expect("wait for me");
         }
         );
     }
-    barrier.wait();
+    println!("before barrier");
+    assert_eq!(rx.iter().take(jobs).fold(0,|a,b|a+b),jobs);
     println!("after barrier");
     let result = Command::new("bcftools")
         .args(&cmd)
@@ -184,14 +189,22 @@ fn _main() -> Result<(), Error> {
         .args(&["-p", "vcf", &final_output])
         .status()
         .expect("couldn't tabix index final vcf");
+    
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
 struct PhaseBlock {
+    id: usize,
     start_index: usize,
     start_position: usize,
     end_index: usize,
     end_position: usize,
+}
+
+struct MetaPhaseBlock {
+    id: usize,
+    phase_blocks: Vec<PhaseBlock>,
 }
 
 fn maximization(
@@ -200,6 +213,7 @@ fn maximization(
     cluster_centers: &mut Vec<Vec<f32>>,
     min_index: &mut usize,
     max_index: &mut usize,
+    molecule_support: &mut Vec<Vec<f32>>,
 ) -> f32 {
     let mut updates: HashMap<usize, Vec<(f32, f32)>> = HashMap::new(); // variant index to vec across
     let mut variant_molecule_count: HashMap<usize, usize> = HashMap::new();
@@ -256,6 +270,8 @@ fn maximization(
                     (cluster_value - cluster_centers[haplotype][*variant_index]).abs();
                 
                 cluster_centers[haplotype][*variant_index] = cluster_value;
+    
+                molecule_support[haplotype][*variant_index] = numerators_denominators.1;
 
             }
         }
@@ -270,7 +286,6 @@ fn expectation(
     molecules: &Vec<Vec<Allele>>,
     cluster_centers: &Vec<Vec<f32>>,
     posteriors: &mut Vec<Vec<f32>>,
-
 ) -> (bool, f32, f32) {
     let mut delta = 0.0;
     //let mut posteriors: Vec<Vec<f32>> = Vec::new();
@@ -315,7 +330,6 @@ fn expectation(
 
         //posteriors.push(mol_posteriors);
 
-         
     }
     (!any_different, log_likelihood, delta)
 }
@@ -325,14 +339,22 @@ fn log_sum_exp(p: &Vec<f32>) -> f32 {
     let sum_rst: f32 = p.iter().map(|x| (x - max_p).exp()).sum();
     max_p + sum_rst.ln()
 }
+fn log_sum_exp64(p: &Vec<f64>) -> f64 {
+    let max_p: f64 = p.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let sum_rst: f64 = p.iter().map(|x| (x - max_p).exp()).sum();
+    max_p + sum_rst.ln()
+}
 fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
-    debug!("thread {} chrom {}end", data.index, data.chrom);
-
+    println!("checking for file {}", data.phased_vcf_done);
+    if Path::new(&data.phased_vcf_done).exists() {
+        println!("phasing complete for chrom {}. Delete .done or output directory if you want to rerun", data.chrom);
+        return Ok(());
+    } else { println!("could not find file, continuing to phasing");}
+    println!("checking for file {}", data.vcf_out_done);
     if !Path::new(&data.vcf_out_done).exists() {
-        //println!("yeah, we are getting all variant assignments in thread {} chrom {}", data.index, data.chrom);
+        println!("could not find file, gathing variant assignments");
         get_all_variant_assignments(data).expect("we error here at get all variant assignments");
-    }
-    debug!("gothere {} chrom{}after", data.index, data.chrom);
+    } else { println!("found file, continuing from previous partial run");}
     let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
     let chrom = vcf_reader
@@ -340,7 +362,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         .name2rid(data.chrom.as_bytes())
         .expect("can't get chrom rid, make sure vcf and bam and fasta contigs match!");
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
-    let mut cluster_centers = init_cluster_centers(vcf_info.num_variants, &data);
+    let (mut cluster_centers, mut molecule_support) =  init_cluster_centers(vcf_info.num_variants, &data);
     let mut window_start: usize = data.start;
     let mut window_end: usize = window_start + data.phasing_window;
     //let mut position_to_index: HashMap<usize, usize> = HashMap::new();
@@ -396,18 +418,31 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 }
                 
                 putative_phase_blocks.push(PhaseBlock{
+                    id: putative_phase_blocks.len(),
                     start_index: phase_block_start,
                     start_position: vcf_info.variant_positions[phase_block_start],
                     end_index: last_attempted_index,
                     end_position: vcf_info.variant_positions[last_attempted_index]
                 });
                 
-                phase_block_start = last_attempted_index + 1;
+                phase_block_start = last_attempted_index;
                 last_window_start = Some(window_start);
-                if phase_block_start >= vcf_info.variant_positions.len() {
-                    break 'outer;
+                if let Some(previous_window_start) = last_window_start {
+                    while previous_window_start >= window_start {
+                        phase_block_start += 1;
+                        
+                        if phase_block_start >= vcf_info.variant_positions.len() {
+                            break 'outer;
+                        }
+                        window_start = vcf_info.variant_positions[phase_block_start];
+                    }
+                } else {
+                    phase_block_start += 1;
+                    if phase_block_start >= vcf_info.variant_positions.len() {
+                        break 'outer;
+                    }
+                    window_start = vcf_info.variant_positions[phase_block_start];
                 }
-                window_start = vcf_info.variant_positions[phase_block_start];
                 eprintln!("in phaseblock but hit breakpoint, reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
                 let seed = [data.seed; 32];
@@ -468,25 +503,9 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 &posteriors,
                 &mut cluster_centers,
                 &mut min_index,
-                &mut max_index
+                &mut max_index,
+                &mut molecule_support
             );
-            /*
-            if iteration != 0 && cluster_center_delta > last_cluster_center_delta {
-                error!("cluster center delta not decreasing! {} to {}, position {}-{}, posterior delta {} to {}", 
-                    last_cluster_center_delta, cluster_center_delta, window_start, window_end, last_posterior_delta, posterior_delta);
-                //error!("poseriors {:?}", posteriors);
-                //let (breaking_point, posteriors, _log_likelihood) = expectation(&molecules, &cluster_centers, true);
-                //error!("and after another maximization cluster center delta was {}", cluster_center_delta);
-
-            } else if iteration != 0 && cluster_center_delta == last_cluster_center_delta {
-                error!("cluster center delta not decreasing! {} to {}, position {}-{}", last_cluster_center_delta, cluster_center_delta, window_start, window_end);
-            }
-            if iteration != 0 && posterior_delta > last_posterior_delta {
-                error!("posterior delta not decreasing! cluster center delta {} to {}, position {}-{}, posterior delta {} to {}", 
-                    last_cluster_center_delta, cluster_center_delta, window_start, window_end, last_posterior_delta, posterior_delta);
-                //error!("poseriors {:?}", posteriors);
-            }
-            */
             last_cluster_center_delta = cluster_center_delta;
             last_posterior_delta = posterior_delta;
             if max_index != 0 {
@@ -508,6 +527,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     println!("DONE phasing long reads! thread {} chrom {}", data.index, data.chrom);
     if in_phaseblock {
         putative_phase_blocks.push(PhaseBlock{
+            id: putative_phase_blocks.len(),
             start_index: phase_block_start,
             start_position: vcf_info.variant_positions[phase_block_start],
             end_index: last_attempted_index,
@@ -565,7 +585,13 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
 
     let new_phase_blocks = phase_phaseblocks(data, &mut cluster_centers, &phase_blocks);
     println!("DONE hic phasing! thread {} chrom {}", data.index, data.chrom);
-    output_phased_vcf(data, cluster_centers, phase_blocks);
+    
+    output_phased_vcf(data, cluster_centers, phase_blocks, &vcf_info, &molecule_support);
+    let result = Command::new("bcftools")
+        .args(&["index", "-f", &data.vcf_out])
+        .status()
+        .expect("bcftools failed us");
+    fs::File::create(data.phased_vcf_done.to_string()).expect("cant create .done file. are the permissions wrong?");
     println!("thread {} chrom {}finished", data.index, data.chrom);
     Ok(())
 }
@@ -619,6 +645,7 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
         if posterior < data.long_switch_threshold {
             // end phase block and add to to_return
             to_return.push(PhaseBlock {
+                id: to_return.len(),
                 start_index: phase_block_start,
                 start_position: vcf_info.variant_positions[phase_block_start],
                 end_index: breakpoint,
@@ -664,6 +691,7 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
     if to_return.len() == 0 {
         if vcf_info.variant_positions.len() > 0 {
             to_return.push(PhaseBlock{
+                id: to_return.len(),
                 start_index: start_index,
                 start_position: vcf_info.variant_positions[start_index],
                 end_index: end_index,
@@ -671,6 +699,7 @@ fn test_long_switch(start_index: usize, end_index: usize, cluster_centers: &mut 
         }
     } else if to_return[to_return.len()-1].end_index != end_index {
         to_return.push(PhaseBlock {
+            id: to_return.len(),
             start_index: phase_block_start,
             start_position: vcf_info.variant_positions[phase_block_start],
             end_index: end_index,
@@ -721,7 +750,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     println!("{} hic reads hitting > 1 variant", hic_reads.len());
     // let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
     // ok that is a map from (phase_block_id1, phase_block_id2) to a map from (pb1_hap, pb2_hap) to counts
-    let mut allele_pair_counts: HashMap<(usize, usize), [u64; 4]> = HashMap::new();
+    let mut allele_pair_counts: HashMap<(usize, usize), [u64; 4]> = HashMap::new(); // allele_index1, allele_index2 => [(alt,alt),(alt,ref),(ref,alt),(ref,ref)]
     // and a map from (allele_index1, allele_index2) to  counts array for [1/1, 1/0, 0/1, 0/0]
     for hic_read in hic_reads {
         for i in 0..hic_read.len() {
@@ -757,36 +786,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                         }
                     }
                 }
-                /*
-                let mut allele1_haps: Vec<u8> = Vec::new();
-                let mut allele2_haps: Vec<u8> = Vec::new();
-                for haplotype in 0..cluster_centers.len() {
-                    if cluster_centers[haplotype][allele1.index] > 0.95  && allele1.allele { //TODO DONT HARD CODE
-                        allele1_haps.push(haplotype as u8);
-                    } else if cluster_centers[haplotype][allele1.index] < 0.05  && !allele1.allele {
-                        allele1_haps.push(haplotype as u8);
-                    }
-                    if cluster_centers[haplotype][allele2.index] > 0.95  && allele2.allele { //TODO DONT HARD CODE
-                        allele2_haps.push(haplotype as u8);
-                    } else if cluster_centers[haplotype][allele2.index] < 0.05  && !allele2.allele {
-                        allele2_haps.push(haplotype as u8);
-                    }
-                }
-                
-                if phase_block1 != phase_block2 {
-                    let min = phase_block1.min(phase_block2);
-                    let max = phase_block1.max(phase_block2);
-                    let hap_counts = all_counts.entry((*min,*max)).or_insert(HashMap::new());
-                    for pb1_hap in &allele1_haps {
-                        for pb2_hap in &allele2_haps {
-                            let count = hap_counts.entry((*pb1_hap, *pb2_hap)).or_insert(0);
-                            *count += 1;
-                        }
-                    }
-                }
-                */
             }
-            
         }
     }
     println!("DONE building allele pair counts (size {})! thread {} chrom {}", allele_pair_counts.len(), data.index, data.chrom);
@@ -836,6 +836,84 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
     }
     println!("DONE creating phase block pair log likelihoods (size {})! thread {} chrom {}", phase_block_pair_phasing_log_likelihoods.len(), data.index, data.chrom);
+    /*
+    // now for each phase block pair, we will normalize the pairing marginal log likelihoods to sum to 1 giving us
+    // posterior probabilities for each marriage
+    for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
+        let mut log_likelihoods:Vec<f32> = Vec::new();
+        let mut posteriors: Vec<f32> = Vec::new();
+        for i in 0..marriage_log_likelihoods.len() {
+            log_likelihoods.push(0.0);
+            posteriors.push(0.0);
+        }
+        for (pairing_index, log_likelihood) in marriage_log_likelihoods.iter() {
+            log_likelihoods[*pairing_index] = *log_likelihood as f32;
+        }
+        let log_denominator = log_sum_exp(&log_likelihoods);
+        let mut max = 0.0;
+        let mut max_index = 0;
+        for i in 0..marriage_log_likelihoods.len() {
+            posteriors[i] = (log_likelihoods[i] - log_denominator).exp();
+            if posteriors[i] >= max {
+                max = posteriors[i];
+                max_index = i;
+            }
+        }
+        println!("after normalizing, phase blocks {} and {} with pairing {} and posterior {}", phase_block1, phase_block2, max_index, max);
+        if max > data.hic_phasing_posterior_threshold {
+            union_find.union(*phase_block1, *phase_block2);
+        }
+    }
+    */
+
+    // How do we want to go about this?
+    // 1. Try to phase largest phase blocks together, merge if possible, then continue
+    // 2. Or find phase blocks that are big enough to be phased and try to phase the ones that are next to one another, merge, then continue
+    let mut phase_blocks_by_length: Vec<PhaseBlock> = Vec::new();
+    for pb in phase_blocks {
+        phase_blocks_by_length.push(*pb);
+    }
+    phase_blocks_by_length.sort_by_key(|pb| (pb.start_index as i32) - (pb.end_index as i32));
+    // am i going to use this?
+
+    let mut phase_blocks_viable: Vec<usize> = Vec::new(); // map from phaseblock id to a numbering, skipping phaseblocks with less than 50 variants.
+    for pb in phase_blocks {
+        if pb.end_index - pb.start_index > 50 {
+            phase_blocks_viable.push(pb.id);
+        } 
+    }
+    let mut viable_phaseblock_index = 1;
+    
+    let mut current_phaseblock_index = phase_blocks_viable[0];
+    let mut next_phaseblock_index = phase_blocks_viable[1];
+    let mut current_meta_phaseblock_id = 0;
+    let mut current_meta_phaseblock = MetaPhaseBlock {
+        id: current_meta_phaseblock_id,
+        phase_blocks: vec![phase_blocks[current_phaseblock_index]],
+    };
+    let mut meta_phaseblocks: Vec<MetaPhaseBlock> = Vec::new();
+
+    while viable_phaseblock_index < phase_blocks_viable.len() - 1 {
+        
+        let (best_pairing, pairing_posterior) = phase_two_phaseblocks(&data, &allele_pair_counts, cluster_centers, &current_meta_phaseblock, &phase_blocks[next_phaseblock_index]);
+        if pairing_posterior > data.hic_phasing_posterior_threshold {
+            merge_phaseblocks(&mut current_meta_phaseblock, &phase_blocks[next_phaseblock_index], &best_pairing);
+            
+        } else {
+            meta_phaseblocks.push(current_meta_phaseblock);
+            current_meta_phaseblock_id += 1;
+            current_phaseblock_index = phase_blocks_viable[viable_phaseblock_index];
+            current_meta_phaseblock = MetaPhaseBlock {
+                id: current_meta_phaseblock_id,
+                phase_blocks: vec![phase_blocks[current_phaseblock_index]],
+            };
+        }
+    }
+    if meta_phaseblocks.len() > 0 && meta_phaseblocks[meta_phaseblocks.len()-1].id != current_meta_phaseblock.id {
+        meta_phaseblocks.push(current_meta_phaseblock);
+    }
+
+    /*
 
     let mut union_find: UnionFind<usize> = UnionFind::new(phase_blocks.len());
     // now for each phase block pair, we will normalize the pairing marginal log likelihoods to sum to 1 giving us
@@ -866,59 +944,6 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
     }
 
-    
-    let mut problem_phaseblocks: HashMap<usize, usize> = HashMap::new();// map from phase block to the number of triangles it ruins
-    for ((phase_block1, phase_block2), marriage_log_likelihoods) in phase_block_pair_phasing_log_likelihoods.iter() {
-        for ((phase_block3, phase_block4), marriage_log_likelihoods2) in phase_block_pair_phasing_log_likelihoods.iter() {
-            
-            if phase_block1 == phase_block3 {
-                if union_find.equiv(*phase_block1, *phase_block2) && 
-                    union_find.equiv(*phase_block2, *phase_block3) && 
-                    union_find.equiv(*phase_block3, *phase_block4) {
-                    let (edge1, post) = get_posterior(marriage_log_likelihoods);
-                    let (edge2, post2) = get_posterior(marriage_log_likelihoods2);
-                    let min = phase_block2.min(phase_block4);
-                    let max = phase_block2.max(phase_block4);
-                    match phase_block_pair_phasing_log_likelihoods.get(&(*min, *max)) {
-                        Some(marriage_log_likelihoods3) => {
-                            let (edge3, post3) = get_posterior(marriage_log_likelihoods3);
-                            let mut problem = false;
-                            if edge1 == 0 && edge2 == 0 && edge3 == 1 {
-                                eprintln!("yeah we have a problem");
-                                problem = true;
-                            } else if edge1 == 0 && edge2 == 1 && edge3 == 0 {
-                                eprintln!("yeah we have a problem2");
-                                problem = true;
-                            } else if edge1 == 1 && edge2 == 0 && edge3 == 0 {
-                                problem = true;
-                                eprintln!("yeah we have a problem3");
-                            } else if edge1 == 1 && edge2 == 1 && edge3 == 1 {
-                                eprintln!("yeah we have a problem4");
-                                problem = true;
-                            } else {
-                                eprintln!("triangle {} - {} - {} consistent", edge1, edge2, edge3);
-                            }
-                            if problem {
-                                let count = problem_phaseblocks.entry(*phase_block1).or_insert(0);
-                                *count += 1;
-                                let count = problem_phaseblocks.entry(*phase_block2).or_insert(0);
-                                *count += 1;
-                                let count = problem_phaseblocks.entry(*phase_block4).or_insert(0);
-                                *count += 1;
-                            }
-                        },
-                        None => (),
-                    }
-                }
-            }
-        }
-    }
-    let mut count_vec: Vec<(&usize, &usize)> = problem_phaseblocks.iter().collect();
-    count_vec.sort_by(|a, b| b.1.cmp(a.1));
-
-    println!("DONE checking triangles (bad triangles {:?})! thread {}, chrom {}",count_vec, data.index, data.chrom);
-    //debug!("problem phaseblocks ruining triangles {:?}", count_vec);
-
 
     let labeling = union_find.into_labeling();
     let mut new_phaseblocks: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -926,6 +951,9 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         let new_phaseblock = new_phaseblocks.entry(*label).or_insert(Vec::new());
         new_phaseblock.push(phase_block_id);
     }
+    
+
+
     // get phaseblock N50... 
     let mut sizes: Vec<usize> = Vec::new();
     let mut total: usize = 0;
@@ -938,6 +966,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         sizes.push(total_length);
         total += total_length;
     }
+    
     println!("after hic phasing we have {} phase blocks for chrom {}", new_phaseblocks.len(), data.chrom);
     sizes.sort_by(|a, b| b.cmp(a));
     println!("{:?}", sizes);
@@ -950,8 +979,72 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             break;
         }
     }
+    */
     println!("done with hic")
 }
+
+fn merge_phaseblocks(phaseblock1: &mut MetaPhaseBlock, phaseblock2: &PhaseBlock, best_pairing: &Vec<(usize, usize)>) {
+
+}
+
+fn phase_two_phaseblocks(data: &ThreadData, allele_pair_counts: &HashMap<(usize, usize), [u64;4]>, 
+    cluster_centers: &Vec<Vec<f32>>, 
+    phaseblock1: &MetaPhaseBlock, phaseblock2: &PhaseBlock) -> (Vec<(usize, usize)>, f64) {
+    let pairings = pairings(data.ploidy);
+    let log_phasing_prior = (1.0/pairings.len() as f64).ln();
+    let mut pairing_log_likelihoods: Vec<f64> = Vec::new();
+    for _ in &pairings { pairing_log_likelihoods.push(log_phasing_prior); }
+    let mut pairing_posteriors: Vec<f64> = Vec::new();
+    let error = 0.2;//TODO dont hard code
+    // get allele pairs
+    for pb1 in &phaseblock1.phase_blocks {
+        for allele1 in pb1.start_index..pb1.end_index {
+            for allele2 in phaseblock2.start_index..phaseblock2.end_index {
+                if let Some(counts) = allele_pair_counts.get(&(allele1, allele2)) { // is there a better way of doing this?
+                    // maybe if i had allele_pair_counts for each phase_block?? then I could iterate instead of doing
+                    // this n^2 business. Oh well, lets code it and see if its slow, optimize only if slow.
+                    let mut total_counts = 0;
+                    for count in counts.iter() { total_counts += *count as u64; }
+                    for (pairing_index, haplotype_pairs) in pairings.iter().enumerate() {
+                        let mut pair_probabilities: [f64;4] = [error; 4];
+                        let mut total = 0.0;
+                        for (pb1_hap, pb2_hap) in haplotype_pairs {
+                            let pb1_allele_frac = cluster_centers[*pb1_hap][allele1] as f64;
+                            let pb2_allele_frac = cluster_centers[*pb2_hap][allele2] as f64;
+                            pair_probabilities[0] += pb1_allele_frac * pb2_allele_frac; // both alt
+                            pair_probabilities[1] += pb1_allele_frac * (1.0 - pb2_allele_frac); // alt/ref
+                            pair_probabilities[2] += (1.0 - pb1_allele_frac) * pb2_allele_frac; // ref/alt
+                            pair_probabilities[3] += (1.0 - pb1_allele_frac) * (1.0 - pb2_allele_frac); // ref/ref
+                        }
+                        for prob in pair_probabilities.iter() {
+                            total += prob;
+                        }
+                        for i in 0..pair_probabilities.len() {
+                            pair_probabilities[i] /= total; // probabilities must sum to 1
+                        }
+                        let multinomial = Multinomial::new(&pair_probabilities, total_counts).unwrap();
+                        pairing_log_likelihoods[pairing_index] += multinomial.ln_pmf(counts);
+                    }
+                }
+            }
+        }
+    } 
+    let mut max_posterior = 0.0;
+    let mut max_pairing = 0;
+    let log_denominator = log_sum_exp64(&pairing_log_likelihoods);
+    for (i, log_likelihood) in pairing_log_likelihoods.iter().enumerate() {
+        let post = (*log_likelihood - log_denominator).exp();
+        pairing_posteriors.push(post);
+        if post > max_posterior {
+            max_posterior = post;
+            max_pairing = i;
+        }
+    }
+    let mut pairing: Vec<(usize, usize)> = Vec::new();
+    for (h1,h2) in &pairings[max_pairing] { pairing.push((*h1, *h2)); }
+    return (pairing, max_posterior);
+}
+
 
 fn get_posterior(marriage_log_likelihoods: &HashMap<usize,f64>) -> (usize, f32) {
     let mut log_likelihoods:Vec<f32> = Vec::new();
@@ -1185,16 +1278,19 @@ fn output_phased_vcf(
     data: &ThreadData,
     cluster_centers: Vec<Vec<f32>>,
     phase_blocks: Vec<PhaseBlock>,
+    vcf_info: &VCF_info,
+    molecule_support: &Vec<Vec<f32>>,
 ) {
     let mut vcf_reader = bcf::IndexedReader::from_path(format!("{}", data.vcf_out.to_string()))
         .expect("could not open indexed vcf reader on output vcf");
     let header_view = vcf_reader.header();
     let mut new_header = bcf::header::Header::from_template(header_view);
     new_header.push_record(br#"##FORMAT=<ID=PS,Number=1,Type=Integer,Description="phase set id">"#);
-    let cluster_center_string = format!(r#"##FORMAT=<ID=CC,Number={},Type=Integer,Description=\"phasstphase cluster center values\">"#, cluster_centers.len());
+    let cluster_center_string = format!(r#"##FORMAT=<ID=CC,Number={},Type=Float,Description="phasstphase cluster center values">"#, cluster_centers.len());
+    let molecule_support_string = format!(r#"##FORMAT=<ID=MS,Number={},Type=Float,Description="weighted molecule support for this haplotype at this location">"#, cluster_centers.len());
     new_header.push_record(&cluster_center_string.as_bytes());
-    let mut vcf_writer = bcf::Writer::from_path(
-        format!("{}/phased_chrom_{}.vcf.gz", data.output, sanitize_filename::sanitize(&data.chrom)),
+    new_header.push_record(&molecule_support_string.as_bytes());
+    let mut vcf_writer = bcf::Writer::from_path(data.phased_vcf_out.to_string(),
         &new_header,
         false,
         Format::Vcf,
@@ -1207,7 +1303,7 @@ fn output_phased_vcf(
             index_to_phase_block.insert(i, id);
         }
     }
-    for r in vcf_reader.records() {
+    for (i, r) in vcf_reader.records().enumerate() {
         let mut rec = r.expect("could not unwrap vcf record");
         let mut new_rec = vcf_writer.empty_record();
         copy_vcf_record(&mut new_rec, &rec);
@@ -1216,8 +1312,18 @@ fn output_phased_vcf(
             Some(id) => new_rec.push_format_integer(b"PS", &[*id as i32]).expect("you did it again, pushing your problems down to future you"),
             None => (),
         }
+        let mut cluster_center: Vec<f32> = Vec::new();
+        for h in 0..cluster_centers.len() {
+            cluster_center.push(cluster_centers[h][i]);
+        }
+        new_rec.push_format_float(b"CC", &cluster_center).expect("blame past self");
+        let mut mol_support: Vec<f32> = Vec::new();
+        for h in 0..cluster_centers.len() {
+            mol_support.push(molecule_support[h][i]);
+        }
+        new_rec.push_format_float(b"MS", &mol_support);
         //let phase_block_id = index_to_phase_block.get(&index).expect("i had it coming");
-        let genotypes = infer_genotype(&cluster_centers, index);
+        let genotypes = infer_genotype(&cluster_centers, index, &vcf_info);
         new_rec.push_genotypes(&genotypes)
             .expect("i did expect this error");
         vcf_writer.write(&new_rec).expect("could not write record");
@@ -1225,18 +1331,37 @@ fn output_phased_vcf(
     }
 }
 
-fn infer_genotype(cluster_centers: &Vec<Vec<f32>>, index: usize) -> Vec<GenotypeAllele> {
+fn infer_genotype(cluster_centers: &Vec<Vec<f32>>, index: usize, vcf_info: &VCF_info) -> Vec<GenotypeAllele> {
     let mut genotypes: Vec<GenotypeAllele> = Vec::new();
+    let mut phased = true;
+    let mut all_point5 = true;
+    for haplotype in 0..cluster_centers.len() {
+        if cluster_centers[haplotype][index] != 0.5 { all_point5 = false;}
+        if cluster_centers[haplotype][index] > 0.95 {
+        } else if cluster_centers[haplotype][index] < 0.05 {
+        } else { phased = false; }
+    }
+    if all_point5 {
+        // we need the genotypes
+        let sample = &vcf_info.genotypes[index];
+        for g in sample {
+            genotypes.push(*g);
+        }
+        return genotypes;
+    }
+    if !phased {
+        let sample = &vcf_info.genotypes[index];
+        for g in sample {
+            genotypes.push(*g);
+        }
+        return genotypes;
+    }
     for haplotype in 0..cluster_centers.len() {
         if cluster_centers[haplotype][index] > 0.95 {
-            genotypes.push(GenotypeAllele::Phased(1));
+                genotypes.push(GenotypeAllele::Phased(1));
         } else if cluster_centers[haplotype][index] < 0.05 {
-            genotypes.push(GenotypeAllele::Phased(0));
-        } else if cluster_centers[haplotype][index] <= 0.5 {
-            genotypes.push(GenotypeAllele::Unphased(0));
-        } else {
-            genotypes.push(GenotypeAllele::Unphased(1));
-        }
+                genotypes.push(GenotypeAllele::Phased(0));
+        }    
     }
     genotypes
 }
@@ -1329,6 +1454,7 @@ struct VCF_info {
     final_position: i64,
     variant_positions: Vec<usize>,
     position_to_index: HashMap<usize, usize>,
+    genotypes: Vec<Vec<GenotypeAllele>>,
 }
 
 fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
@@ -1336,6 +1462,7 @@ fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
         .header()
         .name2rid(data.chrom.as_bytes())
         .expect("cant get chrom rid");
+    let mut genotypes: Vec<Vec<GenotypeAllele>> = Vec::new();
     vcf.fetch(chrom, 0, None).expect("could not fetch in vcf");
     let mut position_to_index: HashMap<usize, usize> = HashMap::new();
     let mut num = 0;
@@ -1344,6 +1471,8 @@ fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
     for r in vcf.records() {
         let rec = r.expect("could not unwrap vcf record");
         last_pos = rec.pos();
+        let gts = rec.genotypes().expect("couldnt unwrap genotypes");
+        genotypes.push(gts.get(0).to_vec());
         variant_positions.push(rec.pos() as usize);
         position_to_index.insert(rec.pos() as usize, num);
         num += 1;
@@ -1354,24 +1483,29 @@ fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
         final_position: last_pos,
         variant_positions: variant_positions,
         position_to_index: position_to_index,
+        genotypes: genotypes,
     }
 }
 
-fn init_cluster_centers(num: usize, data: &ThreadData) -> Vec<Vec<f32>> {
+fn init_cluster_centers(num: usize, data: &ThreadData) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
     let seed = [data.seed; 32];
     let mut rng: StdRng = SeedableRng::from_seed(seed);
     let mut cluster_centers: Vec<Vec<f32>> = Vec::new();
+    let mut molecule_supports: Vec<Vec<f32>> = Vec::new();
     for k in 0..data.ploidy {
         let mut cluster_center: Vec<f32> = Vec::new();
+        let mut molecule_support: Vec<f32> = Vec::new();
         for v in 0..num {
             cluster_center.push(0.5);
+            molecule_support.push(0.0);
         }
         if cluster_center.len() > 0 {
             cluster_center[0] = rng.gen::<f32>().min(0.98).max(0.02);
             cluster_centers.push(cluster_center);
+            molecule_supports.push(molecule_support);
         }
     }
-    cluster_centers
+    (cluster_centers, molecule_supports)
 }
 
 fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
@@ -1697,8 +1831,11 @@ fn get_read_assignments(
         .expect("blah"); // skip to region of bam of this variant position
     let ref_start = (pos - window) as u64;
     let ref_end = (pos + window + ref_allele.len()) as u64;
+    let padding = 15;
+    let ref_start_padded = ref_start - padding;// TODO dont hard code
+    let ref_end_padded = ref_end + padding; // TODO dont hard code
     fasta
-        .fetch(&chrom, ref_start, ref_end)
+        .fetch(&chrom, ref_start_padded, ref_end_padded)
         .expect("fasta fetch failed");
     let mut ref_sequence: Vec<u8> = Vec::new();
     fasta
@@ -1706,17 +1843,20 @@ fn get_read_assignments(
         .expect("failed to read fasta sequence");
     //if pos == 69505 { println!("yes, this one"); }
     let mut alt_sequence: Vec<u8> = Vec::new();
-    for i in 0..window as usize {
+    for i in 0..(window + padding as usize) as usize {
         alt_sequence.push(ref_sequence[i]);
     }
     for base in alt_allele.as_bytes() {
         alt_sequence.push(*base);
     }
-    for i in (window as usize + ref_allele.len())..ref_sequence.len() {
+    for i in (window as usize + ref_allele.len() + padding as usize)..ref_sequence.len() {
         alt_sequence.push(ref_sequence[i]);
     }
     let mut read_names_ref: Vec<String> = Vec::new();
     let mut read_names_alt: Vec<String> = Vec::new();
+    
+    let mut ambiguous_count: f32 = 0.0;
+    let mut total: f32 = 0.0;
     for _rec in bam.records() {
         let rec = _rec.expect("cannot read bam record");
         if rec.mapq() < min_mapq {
@@ -1758,20 +1898,105 @@ fn get_read_assignments(
         let seq = rec.seq().as_bytes()[read_start..read_end].to_vec();
         let score = |a: u8, b: u8| if a == b { MATCH } else { MISMATCH };
         let mut aligner = banded::Aligner::new(GAP_OPEN, GAP_EXTEND, score, K, W);
-        let ref_alignment = aligner.local(&seq, &ref_sequence);
-        let alt_alignment = aligner.local(&seq, &alt_sequence);
+        let ref_alignment = aligner.semiglobal(&seq, &ref_sequence);
+        let alt_alignment = aligner.semiglobal(&seq, &alt_sequence);
+        total += 1.0;
         if ref_alignment.score > alt_alignment.score {
             read_names_ref.push(std::str::from_utf8(rec.qname()).expect("wtff").replace(":","_").replace(";","-").to_string());
         } else if alt_alignment.score > ref_alignment.score {
             read_names_alt.push(std::str::from_utf8(rec.qname()).expect("wtf").replace(":","_").replace(";","-").to_string());
+        } else {
+            ambiguous_count += 1.0;
+        }
+        if pos > 40240800 && pos < 40240809 {
+
+            println!("molecule alignment scores {} and {}, lengths {} {}",ref_alignment.score, alt_alignment.score,ref_sequence.len(), alt_sequence.len());
+            println!("{}",str::from_utf8(&ref_sequence).unwrap());
+            println!("{}",str::from_utf8(&alt_sequence).unwrap());
+            println!("reference alignment");
+            pretty_print(&ref_alignment, &seq, &ref_sequence);
+            println!("alt alignment");
+            pretty_print(&alt_alignment, &seq, &alt_sequence);
         }
         //if pos == 69505 { println!("scores {} and {}",ref_alignment.score, alt_alignment.score);
         //println!("read_names_ref {}, read_names_alt {}", read_names_ref.len(), read_names_alt.len()); }
     }
-
+    if ambiguous_count / total > 0.15 { // TODO dont hard code stuff
+        read_names_ref = Vec::new();
+        read_names_alt = Vec::new();
+    }
     let concat_ref = read_names_ref.join(";");
     let concat_alt = read_names_alt.join(";");
     (concat_ref, concat_alt)
+}
+
+fn pretty_print(aln: &bio::alignment::Alignment, x: &Vec<u8>, y: &Vec<u8>) {
+    let mut s1: Vec<u8> = Vec::new();
+    let mut s2: Vec<u8> = Vec::new();
+    let mut s3: Vec<u8> = Vec::new();
+    let mut x_index: usize = 0;
+    let mut y_index: usize = 0;
+    if aln.xstart > aln.ystart {
+        for i in 0..(aln.xstart-aln.ystart) {
+            s2.push(b' ');
+            s1.push(x[x_index]);
+            x_index += 1;
+            s3.push(b' ');
+        }
+    } else if aln.ystart > aln.xstart {
+        for i in 0..(aln.ystart-aln.xstart) {
+            s2.push(b' ');
+            s3.push(y[y_index]);
+            y_index += 1;
+            s1.push(b' ');
+        }
+    }
+
+    for op in &aln.operations {
+        match op {
+            bio::alignment::AlignmentOperation::Match => {
+                s1.push(x[x_index]);
+                x_index += 1;
+                s2.push(b'|');
+                s3.push(y[y_index]);
+                y_index += 1;
+            },
+            bio::alignment::AlignmentOperation::Subst => {
+                s1.push(x[x_index]);
+                x_index += 1;
+                s3.push(y[y_index]);
+                y_index += 1;
+                s2.push(b'x');
+            },
+            bio::alignment::AlignmentOperation::Del => {
+                s1.push(b'-');
+                s2.push(b'-');
+                s3.push(y[y_index]);
+                y_index += 1;
+            },
+            bio::alignment::AlignmentOperation::Ins => {
+                s1.push(x[x_index]);
+                x_index += 1;
+                s2.push(b'-');
+                s3.push(b'-');
+            },
+            _ => {},
+
+        }
+    }
+    if x_index < x.len() {
+        for xi in x_index..x.len() {
+            s1.push(x[xi]);
+        }
+    }
+    if y_index < y.len() {
+        for yi in y_index..y.len() {
+            s3.push(y[yi]);
+        }
+    }
+    println!("{}",str::from_utf8(&s1).expect("couldnt unwrap"));
+    println!("{}",str::from_utf8(&s2).expect("couldnt unwrap2"));
+    println!("{}",str::from_utf8(&s3).expect("couldnt unwrap3"));
 }
 
 fn is_heterozygous(gt: bcf::record::Genotype) -> bool {
@@ -1809,11 +2034,13 @@ struct ThreadData {
     window: usize,
     output: String,
     vcf_out: String,
+    phased_vcf_out: String,
     vcf_out_done: String,
+    phased_vcf_done: String,
     phasing_window: usize,
     seed: u8,
     ploidy: usize,
-    hic_phasing_posterior_threshold: f32,
+    hic_phasing_posterior_threshold: f64,
     long_switch_threshold: f32,
 }
 
@@ -1831,7 +2058,7 @@ struct Params {
     min_base_qual: u8,
     window: usize,
     phasing_window: usize,
-    hic_phasing_posterior_threshold: f32,
+    hic_phasing_posterior_threshold: f64,
     long_switch_threshold: f32,
     chrom: Option<String>,
     start: Option<usize>,
@@ -1865,7 +2092,7 @@ fn load_params() -> Params {
     let min_base_qual = min_base_qual.to_string().parse::<u8>().unwrap();
 
     let hic_phasing_posterior_threshold = params.value_of("hic_phasing_posterior_threshold").unwrap();
-    let hic_phasing_posterior_threshold = hic_phasing_posterior_threshold.to_string().parse::<f32>().unwrap();
+    let hic_phasing_posterior_threshold = hic_phasing_posterior_threshold.to_string().parse::<f64>().unwrap();
 
 
     let fasta = params.value_of("fasta").unwrap();
@@ -1905,6 +2132,8 @@ fn load_params() -> Params {
         start = None;
         end = None;
     }
+
+
 
     Params {
         output: output.to_string(),
