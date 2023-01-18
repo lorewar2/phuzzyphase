@@ -78,8 +78,28 @@ def get_gt(rec, sample):
     gt_vcf = separator.join(bases)
     return(gt_vcf)
 
+import numpy as np
+from sklearn.neighbors import NearestNeighbors
+
+closest_indel = {}
+'''
+for contig in fasta.keys():
+    print("building nearest neighbor for "+str(contig))
+    try:
+        vcf1.fetch(contig)
+    except:
+        continue
+    indel_positions = []
+    for rec in vcf1:
+        if rec.is_indel:
+            indel_positions.append([rec.POS]) 
+    neighbors = NearestNeighbors(n_neighbors=1)    
+    if len(indel_positions) > 0:
+        neighbors.fit(indel_positions)
+        closest_indel[contig] = neighbors
+'''
 with open(args.output,'w') as out:
-    out.write("\t".join(["chrom","pos","in_vcf","in_gt","depth","is_het_vcf","is_het_gt","gt_vcf","gt_gt","ps_vcf","ps_gt","hap1","hap2","hap1mols","hap2mols"])+"\n")
+    out.write("\t".join(["chrom","pos","ref","alt","is_indel","phased","closest_indel","in_vcf","in_gt","depth","is_het_vcf","is_het_gt","gt_vcf","gt_gt","ps_vcf","ps_gt","hap1","hap2","hap1mols","hap2mols"])+"\n")
     for contig in fasta.keys():
         try:
             print("fetching "+str(contig))
@@ -102,13 +122,27 @@ with open(args.output,'w') as out:
             hap2 = "-1"
             hap1mols = "-1"
             hap2mols = "-1"
+            phased = "0"
+            ref = "N"
+            alt = "N"
+            is_indel = "0"
+            indel_dist = "-1"
             if putative:
                 in_vcf = "1"
                 pos = putative.POS
+                if putative.CHROM in closest_indel:
+                    indel_dist = closest_indel[putative.CHROM].kneighbors([[pos]],1,return_distance=True)[0][0][0] # I have no idea. I hope it doesnt break
+                ref = putative.REF
+                alt = putative.ALT[0]
+                if putative.is_indel:
+                    is_indel = "1"
+                
                 sample = putative.samples[0]
                 if sample.is_het:
                     is_het_vcf = "1"
                 gt_vcf = sample['GT']#get_gt(putative, sample)
+                if sample.phased:
+                    phased = "1"
                 try:
                     haps = sample['CC']
                     hap1 = str(haps[0])
@@ -128,6 +162,12 @@ with open(args.output,'w') as out:
             if ground_truth:
                 in_gt = "1"
                 pos = ground_truth.POS
+                ref = ground_truth.REF
+                alt = ground_truth.ALT[0]
+                if ground_truth.is_indel:
+                    is_indel = "1"
+                if ground_truth.CHROM in closest_indel:
+                    indel_dist = closest_indel[ground_truth.CHROM].kneighbors([[pos]],1,return_distance=True)[0][0][0]
                 sample = ground_truth.samples[0]
                 if sample.is_het:
                     is_het_gt = "1"
@@ -140,5 +180,5 @@ with open(args.output,'w') as out:
             #for read in bam.fetch(contig, pos, pos+1):
             #    depth += 1
             
-            out.write("\t".join([contig, str(pos), in_vcf, in_gt, str(depth), is_het_vcf, is_het_gt,
+            out.write("\t".join([contig, str(pos), str(ref), str(alt), is_indel, str(indel_dist), in_vcf, in_gt, str(depth), is_het_vcf, is_het_gt,
                 gt_vcf, gt_gt, ps_vcf, ps_gt, hap1, hap2, hap1mols, hap2mols])+"\n")

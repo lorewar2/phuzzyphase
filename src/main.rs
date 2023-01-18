@@ -15,6 +15,7 @@ extern crate env_logger;
 use log::{debug, error, log_enabled, info, trace, Level};
 
 use std::sync::mpsc::channel;
+use std::thread::Thread;
 
 
 use rand::rngs::StdRng;
@@ -23,6 +24,7 @@ use rand::SeedableRng;
 use std::process::Command;
 use std::{thread, time};
 use std::str;
+use std::cmp::Ordering;
 use threadpool::ThreadPool;
 use std::sync::{Arc, Barrier};
 
@@ -51,6 +53,7 @@ use std::path::Path;
 use crate::statrs::distribution::DiscreteCDF;
 
 use hashbrown::{HashMap, HashSet};
+use std::collections::BinaryHeap;
 
 use clap::App;
 
@@ -373,6 +376,8 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     let mut last_attempted_index: usize = 0;
     let mut in_phaseblock = false;
     let mut last_window_start: Option<usize> = None;
+    let seed = [data.seed; 32];
+    let mut rng: StdRng = SeedableRng::from_seed(seed);
     'outer: while window_start < data.end
         && window_start < vcf_info.final_position as usize
     {
@@ -386,12 +391,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         vcf_reader
             .fetch(chrom, window_start as u64, Some(window_end as u64))
             .expect("some actual error");
-        //println!(
-        //    "fetching region {}:{}-{}",
-        //    data.chrom, window_start, window_end
-        //);
         let (molecules, first_var_index, last_var_index) = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIFI);
-        //println!("{} molecules", molecules.len());
         let mut iteration = 0;
         let mut min_index: usize = 0;
         let mut max_index: usize = 0;
@@ -440,22 +440,24 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                     phase_block_start += 1;
                     if phase_block_start >= vcf_info.variant_positions.len() {
                         break 'outer;
-                    }
+                    } // we are at the end of the region or chromosome, we are done
                     window_start = vcf_info.variant_positions[phase_block_start];
                 }
                 eprintln!("in phaseblock but hit breakpoint, reseting window start to {}", window_start);
                 window_end = window_start + data.phasing_window;
-                let seed = [data.seed; 32];
-                let mut rng: StdRng = SeedableRng::from_seed(seed);
                 for haplotype in 0..cluster_centers.len() {
                     cluster_centers[haplotype][phase_block_start] =
                         rng.gen::<f32>().min(0.98).max(0.02);
                 }
-                
+                in_phaseblock = false;
                 continue 'outer;
             } else if !in_phaseblock && breaking_point {
+                
                 eprintln!("not in a phaseblock, but hit breaking point. resetting window");
-                if first_var_index == usize::MAX { // there were no variants
+                for haplotype in 0..cluster_centers.len() {
+                    cluster_centers[haplotype][phase_block_start] = 0.5;
+                }
+                if first_var_index == usize::MAX { // there were no variants in this window
                     // we need to find a new starting point
                     eprintln!("\tthere were no variants, scanning forward for window start");
                     for (index, position) in vcf_info.variant_positions.iter().enumerate() {
@@ -485,7 +487,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
                 
                 if phase_block_start >= vcf_info.variant_positions.len() {
                     break 'outer;
-                }
+                } // we are at the end of the region or chromosome
                 last_window_start = Some(window_start);
                 window_start = vcf_info.variant_positions[phase_block_start];
                 eprintln!("reseting window start to {}", window_start);
@@ -748,6 +750,20 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         .expect("some actual error");
     let (hic_reads, _, _) = get_read_molecules(&mut vcf_reader, &vcf_info, READ_TYPE::HIC);
     println!("{} hic reads hitting > 1 variant", hic_reads.len());
+
+    // Okay what do I really want? Maybe a map from (pb1_id, pb2_id) to a map from (allele1, allele2) to counts array????
+    // OR map pb1_id to map from pb2_id to map from (allele1, allele2) to counts array???
+    // benefits of 1: fewer hashmaps
+    // benefits of 2: can query all phaseblocks for a given phaseblock
+    // okay, wrap this in a struct
+    let mut phaseblock_allele_pair_counts: PhaseBlockAllelePairCounts = PhaseBlockAllelePairCounts::new();
+
+    // Eventually I will have a max heap of posterior probability phasing and a pair of metaphaseblocks
+    // I will pop the heap and merge these two phaseblocks if they have high enough probability
+    // but then I need to remove from the heap any element containing either of these metaphaseblocks
+    // or I can keep a set of ids that have already been merged?? and ignore them if the heap pops with 
+    // one already in the merged set? 
+
     // let mut all_counts: HashMap<(usize, usize), HashMap<(u8,u8), usize>> = HashMap::new();
     // ok that is a map from (phase_block_id1, phase_block_id2) to a map from (pb1_hap, pb2_hap) to counts
     let mut allele_pair_counts: HashMap<(usize, usize), [u64; 4]> = HashMap::new(); // allele_index1, allele_index2 => [(alt,alt),(alt,ref),(ref,alt),(ref,ref)]
@@ -761,28 +777,40 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
                 let phase_block1 = phase_block_ids.get(&allele1.index).expect(&format!("if you are reading this, i screwed up, allele index {} not in a phase block", allele1.index));
                 let phase_block2 = phase_block_ids.get(&allele2.index).expect("why didnt the previous one fail first?");
                 if phase_block1 != phase_block2 {
-
+                    let minpb = phase_block1.min(phase_block2);
+                    let maxpb = phase_block1.max(phase_block2);
+                    let pb_allele_pair_counts: &mut AllelePairCounts = phaseblock_allele_pair_counts.counts.entry((*minpb, *maxpb)).or_insert(AllelePairCounts::new());
                     if allele1.index < allele2.index {
                         let counts = allele_pair_counts.entry((allele1.index, allele2.index)).or_insert([0;4]);
+                        let pbcounts: &mut [u64; 4] = pb_allele_pair_counts.counts.entry((allele1.index, allele2.index)).or_insert([0;4]);
                         if allele1.allele && allele2.allele { // alt and alt
                             counts[0] += 1;
+                            pbcounts[0] += 1;
                         } else if allele1.allele && !allele2.allele { // alt and ref
                             counts[1] += 1;
+                            pbcounts[1] += 1;
                         } else if !allele1.allele && allele2.allele { // ref and alt
                             counts[2] += 1;
+                            pbcounts[2] += 1;
                         } else { // ref and ref
                             counts[3] += 1;
+                            pbcounts[3] += 1;
                         }
                     } else {
                         let counts = allele_pair_counts.entry((allele2.index, allele1.index)).or_insert([0;4]);
+                        let pbcounts: &mut [u64; 4] = pb_allele_pair_counts.counts.entry((allele2.index, allele1.index)).or_insert([0;4]);
                         if allele2.allele && allele1.allele { // alt and alt
                             counts[0] += 1;
+                            pbcounts[0] += 1;
                         } else if allele2.allele && !allele1.allele { // alt and ref
                             counts[1] += 1;
+                            pbcounts[1] += 1;
                         } else if !allele2.allele && allele1.allele { // ref and alt
                             counts[2] += 1;
+                            pbcounts[2] += 1;
                         } else { // ref and ref
                             counts[3] += 1;
+                            pbcounts[3] += 1;
                         }
                     }
                 }
@@ -792,7 +820,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     println!("DONE building allele pair counts (size {})! thread {} chrom {}", allele_pair_counts.len(), data.index, data.chrom);
     
     let mut phase_block_pair_phasing_log_likelihoods: HashMap<(usize, usize), HashMap<usize, f64>> = HashMap::new();
-    // this is a map from (phase_block_id1, phase_block_id2) 
+    // this is a map from (phase_block_id1, phase_block_id2) to a map from a pairing index to a log likelihood
     // okay now i have allele_pair_counts which will contribute log likelihoods to phaseblock pairs
     let all_possible_pairings = pairings(data.ploidy); // get all pairings
     let log_phasing_prior = (1.0/(all_possible_pairings.len() as f64)).ln();
@@ -805,19 +833,13 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
         }
         let phase_block1 = phase_block_ids.get(&allele1_index).expect("if you are reading this, i screwed up");
         let phase_block2 = phase_block_ids.get(&allele2_index).expect("why didnt the previous one fail first?");
-        //eprintln!("allele pair {} {} hitting phase blocks {} {} with counts {:?}", allele1_index, allele2_index, phase_block1, phase_block2, counts);
         let min = phase_block1.min(phase_block2);
         let max = phase_block1.max(phase_block2);
         let phase_block_log_likelihoods = phase_block_pair_phasing_log_likelihoods.entry((*min, *max)).or_insert(HashMap::new());
         for (pairing_index, haplotype_pairs) in all_possible_pairings.iter().enumerate() {
             let log_likelihood = phase_block_log_likelihoods.entry(pairing_index).or_insert(log_phasing_prior);
-            //eprintln!("\tmarriage {}:{:?}",pairing_index, haplotype_pairs);
             let mut pair_probabilities: [f64;4] = [error; 4];
             let mut total = 0.0; // for normalization to sum to 1
-            //for hap in 0..data.ploidy {
-            //    eprintln!("\t\thaplotype {} allele1 frac {}, allele2 frac {}", 
-            //        hap, cluster_centers[hap][*allele1_index], cluster_centers[hap][*allele2_index]);
-            //}
             for (phase_block1_hap, phase_block2_hap) in haplotype_pairs.iter() {
                 let phase_block1_allele_frac = cluster_centers[*phase_block1_hap][*allele1_index] as f64;
                 let phase_block2_allele_frac = cluster_centers[*phase_block2_hap][*allele2_index] as f64;
@@ -828,11 +850,8 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
             }
             for psuedocount in pair_probabilities.iter() { total += psuedocount; }
             for index in 0..4 { pair_probabilities[index] /= total; } // normalize to sum to 1.0
-            //eprintln!("\t\tfinal probabilities {:?}", pair_probabilities);
             let multinomial_distribution = Multinomial::new(&pair_probabilities, total_counts).unwrap();
-           
             *log_likelihood += multinomial_distribution.ln_pmf(counts);
-            //eprintln!("\t\t\tlikelihood update {}, in log {}, total log {}",multinomial_distribution.pmf(counts), multinomial_distribution.ln_pmf(counts), log_likelihood);
         }
     }
     println!("DONE creating phase block pair log likelihoods (size {})! thread {} chrom {}", phase_block_pair_phasing_log_likelihoods.len(), data.index, data.chrom);
@@ -869,13 +888,61 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     // How do we want to go about this?
     // 1. Try to phase largest phase blocks together, merge if possible, then continue
     // 2. Or find phase blocks that are big enough to be phased and try to phase the ones that are next to one another, merge, then continue
-    let mut phase_blocks_by_length: Vec<PhaseBlock> = Vec::new();
-    for pb in phase_blocks {
-        phase_blocks_by_length.push(*pb);
+    // 3. Or find all pairwise posterior probabilities of phasing... merge highest posterior probability phasing phaseblocks, then compute 
+    // phasing of the newly merged metaphaseblock to other phaseblocks.. continuing to merge highest posterior probability phasing blocks 
+    // until the highest posterior is below some threshold.
+    // okay lets do #3
+    let mut meta_phaseblocks: Vec<MetaPhaseBlock> = Vec::new();
+    let mut meta_phaseblock_map: HashMap<usize, MetaPhaseBlock> = HashMap::new();
+    let mut largest_id_so_far: usize = 0;
+    for (index, pb) in phase_blocks.iter().enumerate() {
+        meta_phaseblocks.push(MetaPhaseBlock { id: index, phase_blocks: vec![*pb] });
+        meta_phaseblock_map.insert(index, MetaPhaseBlock { id: index, phase_blocks: vec![*pb] });
+        largest_id_so_far = index;
     }
-    phase_blocks_by_length.sort_by_key(|pb| (pb.start_index as i32) - (pb.end_index as i32));
-    // am i going to use this?
+    let mut pairwise_posteriors_heap = 
+        pairwise_phasing(&meta_phaseblocks, &allele_pair_counts, &phase_block_ids, cluster_centers, data);
+    while pairwise_posteriors_heap.len() != 0 {
+        let top = pairwise_posteriors_heap.pop().unwrap();
+        if top.log_posterior_phasing.exp() <= data.hic_phasing_posterior_threshold {
+            break;
+        }
+    }
 
+    while pairwise_posteriors_heap.len() != 0 {
+        let phase_block_pair_phasing = pairwise_posteriors_heap.pop().unwrap();
+        if phase_block_pair_phasing.log_posterior_phasing.exp() <= data.hic_phasing_posterior_threshold {
+            break;
+        }
+    
+        // check if either ids are already merged and if so, continue
+        if !meta_phaseblock_map.contains_key(&phase_block_pair_phasing.id1) || 
+            !meta_phaseblock_map.contains_key(&phase_block_pair_phasing.id2) {
+            continue;
+        }
+        let meta_block1 = meta_phaseblock_map.get(&phase_block_pair_phasing.id1).unwrap();
+        let meta_block2 = meta_phaseblock_map.get(&phase_block_pair_phasing.id2).unwrap();
+        // merge the phaseblocks
+        let new_meta_phaseblock = merge_phaseblocks(meta_block1, 
+            meta_block2, 
+            &phase_block_pair_phasing.phase_pairing, 
+            cluster_centers, &mut largest_id_so_far);
+        // remove both from meta_phaseblock_map
+        meta_phaseblock_map.remove(&phase_block_pair_phasing.id1);
+        meta_phaseblock_map.remove(&phase_block_pair_phasing.id2);
+        
+        // compute phasing posteriors of newly merged phaseblock to all existing phaseblocks
+        let all_new_phasings: Vec<MetaBlockPairPhasing> = get_new_phasings(&meta_phaseblock_map, 
+            &new_meta_phaseblock, 
+            &phaseblock_allele_pair_counts, cluster_centers, data);
+        // and add the new pairing phasings to the heap
+        for meta_block_phasing in all_new_phasings {
+            pairwise_posteriors_heap.push(meta_block_phasing);
+        }
+        meta_phaseblock_map.insert(new_meta_phaseblock.id, new_meta_phaseblock);
+        
+    }
+    /* 
     let mut phase_blocks_viable: Vec<usize> = Vec::new(); // map from phaseblock id to a numbering, skipping phaseblocks with less than 50 variants.
     for pb in phase_blocks {
         if pb.end_index - pb.start_index > 50 {
@@ -894,7 +961,6 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     let mut meta_phaseblocks: Vec<MetaPhaseBlock> = Vec::new();
 
     while viable_phaseblock_index < phase_blocks_viable.len() - 1 {
-        
         let (best_pairing, pairing_posterior) = phase_two_phaseblocks(&data, &allele_pair_counts, cluster_centers, &current_meta_phaseblock, &phase_blocks[next_phaseblock_index]);
         if pairing_posterior > data.hic_phasing_posterior_threshold {
             merge_phaseblocks(&mut current_meta_phaseblock, &phase_blocks[next_phaseblock_index], &best_pairing);
@@ -912,6 +978,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     if meta_phaseblocks.len() > 0 && meta_phaseblocks[meta_phaseblocks.len()-1].id != current_meta_phaseblock.id {
         meta_phaseblocks.push(current_meta_phaseblock);
     }
+    */
 
     /*
 
@@ -983,50 +1050,221 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>, pha
     println!("done with hic")
 }
 
-fn merge_phaseblocks(phaseblock1: &mut MetaPhaseBlock, phaseblock2: &PhaseBlock, best_pairing: &Vec<(usize, usize)>) {
+fn get_new_phasings(meta_phaseblock_map: &HashMap<usize, MetaPhaseBlock>, 
+    new_meta_phaseblock: &MetaPhaseBlock, 
+    phase_block_allele_pair_counts: &PhaseBlockAllelePairCounts, 
+    cluster_centers: &Vec<Vec<f32>>, 
+    data: &ThreadData) -> Vec<MetaBlockPairPhasing> {
+    let mut to_return: Vec<MetaBlockPairPhasing> = Vec::new();
 
+    return to_return;
+}
+
+fn pairwise_phasing(meta_phaseblocks: &Vec<MetaPhaseBlock>, 
+    allele_pair_counts: &HashMap<(usize, usize), [u64; 4]>, 
+    phase_block_ids: &HashMap<usize, usize>,
+    cluster_centers: &Vec<Vec<f32>>, data: &ThreadData) -> BinaryHeap<MetaBlockPairPhasing> {
+    let mut phase_block_pair_phasing_log_likelihoods: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
+    // this is a map from (phase_block_id1, phase_block_id2) to a map from a pairing index to a log likelihood
+        
+    let mut pair_posterior_heap: BinaryHeap<MetaBlockPairPhasing> = BinaryHeap::new();
+    let all_possible_pairings = pairings(data.ploidy); // get all pairings
+    let log_phasing_prior = (1.0/(all_possible_pairings.len() as f64)).ln();
+    let error = 0.2; // TODO do not hard code
+    // each pairing implies a multinomial distribution on each pair of alleles
+    for ((allele1_index, allele2_index), counts) in allele_pair_counts.iter() {
+        let mut total_counts: u64 = 0;
+        for count in counts.iter() {
+            total_counts += *count as u64;
+        }
+        let phase_block1 = phase_block_ids.get(&allele1_index).expect("if you are reading this, i screwed up");
+        let phase_block2 = phase_block_ids.get(&allele2_index).expect("why didnt the previous one fail first?");
+        let min = phase_block1.min(phase_block2);
+        let max = phase_block1.max(phase_block2);
+        let phase_block_log_likelihoods = 
+            phase_block_pair_phasing_log_likelihoods.entry((*min, *max)).or_insert(Vec::new());
+        for (pairing_index, haplotype_pairs) in all_possible_pairings.iter().enumerate() {
+            if phase_block_log_likelihoods.len() == pairing_index {
+                phase_block_log_likelihoods.push(log_phasing_prior);
+            }
+            //let log_likelihood = phase_block_log_likelihoods[pairing_index];
+            let mut pair_probabilities: [f64;4] = [error; 4];
+            let mut total = 0.0; // for normalization to sum to 1
+            for (phase_block1_hap, phase_block2_hap) in haplotype_pairs.iter() {
+                let phase_block1_allele_frac = cluster_centers[*phase_block1_hap][*allele1_index] as f64;
+                let phase_block2_allele_frac = cluster_centers[*phase_block2_hap][*allele2_index] as f64;
+                pair_probabilities[0] += phase_block1_allele_frac * phase_block2_allele_frac;
+                pair_probabilities[1] += phase_block1_allele_frac * (1.0 - phase_block2_allele_frac);
+                pair_probabilities[2] += (1.0 - phase_block1_allele_frac) * phase_block2_allele_frac;
+                pair_probabilities[3] += (1.0 - phase_block1_allele_frac) * (1.0 - phase_block2_allele_frac);
+            }
+            for psuedocount in pair_probabilities.iter() { total += psuedocount; }
+            for index in 0..4 { pair_probabilities[index] /= total; } // normalize to sum to 1.0
+            let multinomial_distribution = Multinomial::new(&pair_probabilities, total_counts).unwrap();
+            phase_block_log_likelihoods[pairing_index] += multinomial_distribution.ln_pmf(counts);
+        }
+    }
+    for ((phaseblock1, phaseblock2), pairing_log_likelihoods) in phase_block_pair_phasing_log_likelihoods {
+        
+        let mut max_log_posterior: f64 = 0.0;
+        let mut max_pairing = 0;
+        let log_denominator: f64 = log_sum_exp64(&pairing_log_likelihoods);
+        for (i, log_likelihood) in pairing_log_likelihoods.iter().enumerate() {
+            let log_post = *log_likelihood - log_denominator;
+            if log_post > max_log_posterior {
+                max_log_posterior = log_post;
+                max_pairing = i;
+            }
+        }
+        let mut pairing: Vec<(usize, usize)> = Vec::new();
+        for (h1, h2) in &all_possible_pairings[max_pairing] { 
+            pairing.push((*h1, *h2)); 
+        }
+        pair_posterior_heap.push(MetaBlockPairPhasing{
+            log_posterior_phasing: max_log_posterior,
+            id1: phaseblock1,
+            id2: phaseblock2,
+            phase_pairing: pairing,
+        });
+    }
+
+    return pair_posterior_heap;
+}
+
+struct MetaBlockPairPhasing {
+    log_posterior_phasing: f64,
+    id1: usize,
+    id2: usize,
+    phase_pairing: Vec<(usize, usize)>,
+}
+
+impl Ord for MetaBlockPairPhasing {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.log_posterior_phasing.partial_cmp(&other.log_posterior_phasing).unwrap()
+    }
+}
+
+impl PartialOrd for MetaBlockPairPhasing {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.log_posterior_phasing.partial_cmp(&other.log_posterior_phasing)
+    }
+}
+
+impl PartialEq for MetaBlockPairPhasing {
+    fn eq(&self, other: &Self) -> bool {
+        self.log_posterior_phasing == other.log_posterior_phasing
+    }
+}
+
+impl Eq for MetaBlockPairPhasing { 
+}
+
+struct PhaseBlockAllelePairCounts {
+    counts: HashMap<(usize, usize), AllelePairCounts>, // phaseblock_id1, phaseblock_id2 -> allelepaircounts
+}
+
+impl PhaseBlockAllelePairCounts {
+    fn new() -> PhaseBlockAllelePairCounts {
+        PhaseBlockAllelePairCounts { counts: HashMap::new(), }
+    }
+}
+
+struct AllelePairCounts {
+    counts: HashMap<(usize, usize), [u64; 4]>, // allele1_id, allele2_id -> [alt/alt, alt/ref, ref/alt, ref/ref] counts
+}
+
+impl AllelePairCounts {
+    fn new() -> AllelePairCounts {
+        AllelePairCounts { counts: HashMap::new(), }
+    }
+}
+
+fn merge_phaseblocks(phaseblock1: &MetaPhaseBlock, 
+    phaseblock2: &MetaPhaseBlock, 
+    best_pairing: &Vec<(usize, usize)>, 
+    cluster_centers: &mut Vec<Vec<f32>>, largest_id_so_far: &mut usize) -> MetaPhaseBlock {
+    *largest_id_so_far += 1;
+    let mut to_return: MetaPhaseBlock = MetaPhaseBlock { id: *largest_id_so_far, phase_blocks: Vec::new() };
+    for pb in phaseblock1.phase_blocks.iter() {
+        to_return.phase_blocks.push(*pb);
+    }
+    for pb in phaseblock2.phase_blocks.iter() {
+        to_return.phase_blocks.push(*pb);
+    }
+    let mut tmp_cluster_center: Vec<Vec<Vec<f32>>> = Vec::new(); // phaseblock, haplotype, index
+    for (pb_index, pb) in phaseblock2.phase_blocks.iter().enumerate() {
+        tmp_cluster_center.push(Vec::new());
+        for haplotype in 0..cluster_centers.len() { 
+            tmp_cluster_center[pb_index].push(Vec::new());
+            for index in pb.start_index..(pb.end_index+1) {
+                tmp_cluster_center[pb_index][haplotype].push(0.0);
+            }
+        }
+    }
+    
+    
+    for (pb1_hap, pb2_hap) in best_pairing {
+        for (pb_index, pb) in phaseblock2.phase_blocks.iter().enumerate() {
+            for index in pb.start_index..(pb.end_index +1) {
+                tmp_cluster_center[pb_index][*pb1_hap][index - pb.start_index] = cluster_centers[*pb2_hap][index];
+            }
+        }
+    }
+    for (pb_index, pb) in phaseblock2.phase_blocks.iter().enumerate() {
+        for haplotype in 0..cluster_centers.len() {
+            for index in pb.start_index..(pb.end_index + 1) {
+                cluster_centers[haplotype][index] = tmp_cluster_center[pb_index][haplotype][index - pb.start_index];
+            } // TODO double check end index is inclusive
+        }
+    }
+    return to_return;
 }
 
 fn phase_two_phaseblocks(data: &ThreadData, allele_pair_counts: &HashMap<(usize, usize), [u64;4]>, 
     cluster_centers: &Vec<Vec<f32>>, 
-    phaseblock1: &MetaPhaseBlock, phaseblock2: &PhaseBlock) -> (Vec<(usize, usize)>, f64) {
+    phaseblock1: &MetaPhaseBlock, phaseblock2: &MetaPhaseBlock) -> (Vec<(usize, usize)>, f64) {
     let pairings = pairings(data.ploidy);
     let log_phasing_prior = (1.0/pairings.len() as f64).ln();
     let mut pairing_log_likelihoods: Vec<f64> = Vec::new();
     for _ in &pairings { pairing_log_likelihoods.push(log_phasing_prior); }
     let mut pairing_posteriors: Vec<f64> = Vec::new();
-    let error = 0.2;//TODO dont hard code
+    let error = 0.2; //TODO dont hard code
     // get allele pairs
     for pb1 in &phaseblock1.phase_blocks {
         for allele1 in pb1.start_index..pb1.end_index {
-            for allele2 in phaseblock2.start_index..phaseblock2.end_index {
-                if let Some(counts) = allele_pair_counts.get(&(allele1, allele2)) { // is there a better way of doing this?
-                    // maybe if i had allele_pair_counts for each phase_block?? then I could iterate instead of doing
-                    // this n^2 business. Oh well, lets code it and see if its slow, optimize only if slow.
-                    let mut total_counts = 0;
-                    for count in counts.iter() { total_counts += *count as u64; }
-                    for (pairing_index, haplotype_pairs) in pairings.iter().enumerate() {
-                        let mut pair_probabilities: [f64;4] = [error; 4];
-                        let mut total = 0.0;
-                        for (pb1_hap, pb2_hap) in haplotype_pairs {
-                            let pb1_allele_frac = cluster_centers[*pb1_hap][allele1] as f64;
-                            let pb2_allele_frac = cluster_centers[*pb2_hap][allele2] as f64;
-                            pair_probabilities[0] += pb1_allele_frac * pb2_allele_frac; // both alt
-                            pair_probabilities[1] += pb1_allele_frac * (1.0 - pb2_allele_frac); // alt/ref
-                            pair_probabilities[2] += (1.0 - pb1_allele_frac) * pb2_allele_frac; // ref/alt
-                            pair_probabilities[3] += (1.0 - pb1_allele_frac) * (1.0 - pb2_allele_frac); // ref/ref
+            for pb2 in &phaseblock2.phase_blocks {
+                for allele2 in pb2.start_index..pb2.end_index {
+                    let min = allele1.min(allele2);
+                    let max = allele1.max(allele2);
+                    if let Some(counts) = allele_pair_counts.get(&(min, max)) { // is there a better way of doing this?
+                        // maybe if i had allele_pair_counts for each phase_block?? then I could iterate instead of doing
+                        // this n^2 business. Oh well, lets code it and see if its slow, optimize only if slow.
+                        let mut total_counts = 0;
+                        for count in counts.iter() { total_counts += *count as u64; }
+                        for (pairing_index, haplotype_pairs) in pairings.iter().enumerate() {
+                            let mut pair_probabilities: [f64;4] = [error; 4];
+                            let mut total = 0.0;
+                            for (pb1_hap, pb2_hap) in haplotype_pairs {
+                                let pb1_allele_frac = cluster_centers[*pb1_hap][allele1] as f64;
+                                let pb2_allele_frac = cluster_centers[*pb2_hap][allele2] as f64;
+                                pair_probabilities[0] += pb1_allele_frac * pb2_allele_frac; // both alt
+                                pair_probabilities[1] += pb1_allele_frac * (1.0 - pb2_allele_frac); // alt/ref
+                                pair_probabilities[2] += (1.0 - pb1_allele_frac) * pb2_allele_frac; // ref/alt
+                                pair_probabilities[3] += (1.0 - pb1_allele_frac) * (1.0 - pb2_allele_frac); // ref/ref
+                            }
+                            for prob in pair_probabilities.iter() {
+                                total += prob;
+                            }
+                            for i in 0..pair_probabilities.len() {
+                                pair_probabilities[i] /= total; // probabilities must sum to 1
+                            }
+                            let multinomial = Multinomial::new(&pair_probabilities, total_counts).unwrap();
+                            pairing_log_likelihoods[pairing_index] += multinomial.ln_pmf(counts);
                         }
-                        for prob in pair_probabilities.iter() {
-                            total += prob;
-                        }
-                        for i in 0..pair_probabilities.len() {
-                            pair_probabilities[i] /= total; // probabilities must sum to 1
-                        }
-                        let multinomial = Multinomial::new(&pair_probabilities, total_counts).unwrap();
-                        pairing_log_likelihoods[pairing_index] += multinomial.ln_pmf(counts);
                     }
                 }
             }
+            
         }
     } 
     let mut max_posterior = 0.0;
@@ -1070,161 +1308,7 @@ fn get_posterior(marriage_log_likelihoods: &HashMap<usize,f64>) -> (usize, f32) 
 }
 
 
-fn do_something(counts: &HashMap<(u8,u8),usize>, ploidy: usize) {
-    let all_possible_pairings = pairings(ploidy); // get all pairings
-    // each pairing implies a multinomial distribution on each pair of alleles
-    
-    if ploidy == 2 { // diploid special case TODO consider making diploid and polyploid generalized?
-        // but maybe the diploid case naturally has more power due to the assumed exclusivity of on allele
-        // on each haplotype
-        let cis1 = counts.get(&(0,0)).unwrap_or(&0);
-        let cis2 = counts.get(&(1,1)).unwrap_or(&0);
-        let trans1 = counts.get(&(0,1)).unwrap_or(&0);
-        let trans2 = counts.get(&(1,0)).unwrap_or(&0);
-        let cis = cis1 + cis2;
-        let trans = trans1 + trans2;
-        let p_value = binomial_test(cis, trans);
-        if p_value < 0.0001 { // TODO DONT HARD CODE
-            if cis > trans {
-                assert!((*cis1.min(cis2) as f32) / (cis as f32) > 0.15, 
-                    "something is weird here, minor allele fraction is small in hic phasing");
-            } else {
-                assert!((*trans1.min(trans2) as f32) / (trans as f32) > 0.15, 
-                    "something is weird here, minor allele fraction is small in hic phasing");
-            }
-        }
-        // do something
-    } else { // polyploid case
-        // create ordering of preferences of haplotypes in phaseblock2 for haplotypes in phaseblock1
-        let (hap1_preferences, hap2_preferences) = 
-            get_marriage_preferences(&counts, ploidy);
-        let mut hap1_rankings: Vec<HashMap<usize, usize>> = Vec::new();
-        let mut hap2_rankings: Vec<HashMap<usize, usize>> = Vec::new();
-        for hap1 in 0..ploidy {
-            let mut rankings: HashMap<usize, usize> = HashMap::new();
-            for (rank, (_, hap2)) in hap1_preferences[hap1].iter().enumerate() {
-                rankings.insert(*hap2, rank);
-            }
-            hap1_rankings.push(rankings);
-        }
-        for hap2 in 0..ploidy {
-            let mut rankings: HashMap<usize, usize> = HashMap::new();
-            for (rank, (_, hap1)) in hap2_preferences[hap2].iter().enumerate() {
-                rankings.insert(*hap1, rank);
-            }
-            hap2_rankings.push(rankings);
-        }
-        let mut has_proposed_to: Vec<HashSet<usize>> = Vec::new();
-        for _h1 in 0..ploidy { has_proposed_to.push(HashSet::new()); }
-        let mut suitor_engagements: HashMap<usize, usize> = HashMap::new();
-        let mut maiden_engagements: HashMap<usize, usize> = HashMap::new(); 
 
-        // step 1: In the first round, first a) each unengaged man proposes to the woman he prefers most, 
-        // and then b) each woman replies "maybe" to her suitor she most prefers and "no" to all other 
-        // suitors. She is then provisionally "engaged" to the suitor she most prefers so far, 
-        // and that suitor is likewise provisionally engaged to her.
-        let mut maidens_proposals: Vec<HashSet<usize>> = Vec::new(); 
-        // each haplotype2_maiden could have multiple proposals
-        for _hap2_maiden in 0..ploidy { maidens_proposals.push(HashSet::new()); }
-        for haplotype1_suitor in 0..ploidy {
-            for (_, haplotype2_maiden) in hap1_preferences[haplotype1_suitor].iter() {
-                has_proposed_to[haplotype1_suitor].insert(*haplotype2_maiden);
-                maidens_proposals[*haplotype2_maiden].insert(haplotype1_suitor);
-            }
-        }
-        for haplotype2_maiden in 0..ploidy {
-            for (_, haplotype1_suitor) in hap2_preferences[haplotype2_maiden].iter() {
-                if maidens_proposals[haplotype2_maiden].contains(haplotype1_suitor) {
-                    suitor_engagements.insert(*haplotype1_suitor, haplotype2_maiden);
-                    maiden_engagements.insert(haplotype2_maiden, *haplotype1_suitor);
-                    break;
-                }
-            }
-        }
-        // steps 2 and on
-        // In each subsequent round, first a) each unengaged man proposes to the most-preferred woman 
-        // to whom he has not yet proposed (regardless of whether the woman is already engaged), 
-        // and then b) each woman replies "maybe" if she is currently not engaged or if she prefers 
-        // this man over her current provisional partner (in this case, she rejects her current 
-        // provisional partner who becomes unengaged). The provisional nature of engagements preserves 
-        // the right of an already-engaged woman to "trade up" (and, in the process, to "jilt" 
-        // her until-then partner).
-        while maiden_engagements.len() < ploidy {
-            let mut maidens_proposals: Vec<HashSet<usize>> = Vec::new(); 
-            // each haplotype2_maiden could have multiple proposals
-            for hap2_maiden in 0..ploidy { maidens_proposals.push(HashSet::new()); }
-
-            for haplotype1_suitor in 0..ploidy {
-                if suitor_engagements.contains_key(&haplotype1_suitor) { continue; }
-                for (_, haplotype2_maiden) in hap1_preferences[haplotype1_suitor].iter() {
-                    if has_proposed_to[haplotype1_suitor].contains(haplotype2_maiden) { 
-                        continue; 
-                    } else {
-                        has_proposed_to[haplotype1_suitor].insert(*haplotype2_maiden);
-                        maidens_proposals[*haplotype2_maiden].insert(haplotype1_suitor);
-                    }
-                }
-            }
-
-            for haplotype2_maiden in 0..ploidy {
-                let mut best_proposal: Option<usize> = None;
-                for (_, haplotype1_suitor) in hap2_preferences[haplotype2_maiden].iter() {
-                    if maidens_proposals[haplotype2_maiden].contains(haplotype1_suitor) {
-                        best_proposal = Some(*haplotype1_suitor);
-                        break;
-                    }
-                }
-                match best_proposal {
-                    Some(hap1_suitor) => {
-                        if !maiden_engagements.contains_key(&haplotype2_maiden) {
-                            maiden_engagements.insert(haplotype2_maiden, hap1_suitor);
-                        } else {
-                            let new_suitor_ranking = hap2_rankings[haplotype2_maiden].get(&hap1_suitor).unwrap_or(&usize::MAX);
-                            let former_suitor = *maiden_engagements.get(&haplotype2_maiden).unwrap();
-                            let former_suitor_ranking = hap2_rankings[haplotype2_maiden].get(&former_suitor).unwrap_or(&usize::MAX);
-                            if new_suitor_ranking < former_suitor_ranking {
-                                // jilting former suitor
-                                maiden_engagements.insert(haplotype2_maiden, hap1_suitor);
-                                suitor_engagements.insert(hap1_suitor, haplotype2_maiden);
-                                suitor_engagements.remove(&former_suitor);
-                            }
-                        }
-                    },
-                    None => (),
-                }
-            }
-        }
-    }
-}
-
-
-
-fn get_marriage_preferences(counts: &HashMap<(u8,u8),usize>, ploidy: usize) -> 
-    (Vec<Vec<(usize, usize)>>, Vec<Vec<(usize, usize)>>) { 
-    let mut hap1_preferences: Vec<Vec<(usize, usize)>> = Vec::new();// (counts, haplotype2)
-    let mut hap2_preferences: Vec<Vec<(usize, usize)>> = Vec::new();
-    for haplotype1 in 0..ploidy {
-        let mut preference_counts: Vec<(usize, usize)> = Vec::new(); // (counts, haplotype2)
-        for haplotype2 in 0..ploidy {
-            let count = counts.get(&(haplotype1 as u8, haplotype2 as u8)).unwrap_or(&0);
-            preference_counts.push((*count, haplotype2));
-        }
-        preference_counts.sort();
-        preference_counts.reverse();
-        hap1_preferences.push(preference_counts);
-    }
-    for haplotype2 in 0..ploidy {
-        let mut preference_counts: Vec<(usize, usize)> = Vec::new(); // (counts, haplotype2)
-        for haplotype1 in 0..ploidy {
-            let count = counts.get(&(haplotype1 as u8, haplotype2 as u8)).unwrap_or(&0);
-            preference_counts.push((*count, haplotype2));
-        }
-        preference_counts.sort();
-        preference_counts.reverse();
-        hap2_preferences.push(preference_counts);
-    }
-    (hap1_preferences, hap2_preferences)
-}
 
 
 fn pairings(size: usize) -> Vec<Vec<(usize, usize)>> {
@@ -1267,7 +1351,7 @@ fn generate_pairings(pairings_so_far: Vec<(usize, usize)>, left_remaining: Vec<u
     return to_return;
 }
 
-fn binomial_test(cis: usize, trans: usize) -> f64 {
+fn _binomial_test(cis: usize, trans: usize) -> f64 {
     let min = cis.min(trans) as u64;
     let n = Binomial::new(0.5, (cis+trans) as u64).unwrap();
     let p_value = n.cdf(min) * 2.0;
@@ -1321,7 +1405,7 @@ fn output_phased_vcf(
         for h in 0..cluster_centers.len() {
             mol_support.push(molecule_support[h][i]);
         }
-        new_rec.push_format_float(b"MS", &mol_support);
+        new_rec.push_format_float(b"MS", &mol_support).expect("failed push format");
         //let phase_block_id = index_to_phase_block.get(&index).expect("i had it coming");
         let genotypes = infer_genotype(&cluster_centers, index, &vcf_info);
         new_rec.push_genotypes(&genotypes)
@@ -1600,9 +1684,9 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
 fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record) {
     new_rec.set_rid(rec.rid());
     new_rec.set_pos(rec.pos());
-    new_rec.set_id(&rec.id());
+    new_rec.set_id(&rec.id()).expect("set id failed");
     for filter in rec.filters() {
-        new_rec.push_filter(&filter);
+        new_rec.push_filter(&filter).expect("push filter failed");
     }
     new_rec
         .set_alleles(&rec.alleles())
@@ -1719,7 +1803,7 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
                             let sample_count = header.sample_count();
                             for i in 0..sample_count {
                                 let gt = rec.genotypes().expect("lkjlkj").get(i as usize);
-                                new_rec.push_genotypes(&gt);
+                                new_rec.push_genotypes(&gt).expect("nope");
                             }
                         } else {
                             match rec.format(&format.Id.as_bytes()).string() {
