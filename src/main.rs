@@ -745,6 +745,16 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>,
         .name2rid(data.chrom.as_bytes())
         .expect("cant get chrom rid");
     let mut allele_phase_block_id: HashMap<usize, usize> = HashMap::new();
+    match &data.hic_bam {
+        Some(hic) => {}, // if has hic continue as normal
+        None => {
+            for (id, pb) in phase_blocks.iter().enumerate() {
+                for allele_id in pb.start_index..pb.end_index { 
+                    allele_phase_block_id.insert(allele_id, pb.start_position); 
+                }    
+            }
+        }
+    }
     let vcf_info: VCF_info = inspect_vcf(&mut vcf_reader, &data);
     let mut phase_block_ids: HashMap<usize,usize> = HashMap::new();
     println!("entering hic phasing with {} phase blocks", phase_blocks.len());
@@ -879,14 +889,16 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>,
     // okay lets do #3
     let mut meta_phaseblocks: Vec<MetaPhaseBlock> = Vec::new();
     let mut meta_phaseblock_map: HashMap<usize, MetaPhaseBlock> = HashMap::new();
-    let mut largest_id_so_far: usize = 0;
+    let mut first_phaseblock_start = 0;
     for (index, pb) in phase_blocks.iter().enumerate() {
+        if index == 0 {
+            first_phaseblock_start = pb.start_position;
+        }
         meta_phaseblocks.push(MetaPhaseBlock { id: pb.id, phase_blocks: vec![*pb] });
         meta_phaseblock_map.insert(index, MetaPhaseBlock { id: pb.id, phase_blocks: vec![*pb] });
-        for allele_id in pb.start_index..pb.end_index { // CHANGE pb.id to largest_id_so_far
-            allele_phase_block_id.insert(allele_id, pb.id); // TODO REALLY THIS TIME
+        for allele_id in pb.start_index..pb.end_index { 
+            allele_phase_block_id.insert(allele_id, first_phaseblock_start); 
         }
-        largest_id_so_far = index; 
     }
     let mut pairwise_posteriors_heap = 
         pairwise_phasing(&allele_pair_counts, &phase_block_ids, cluster_centers, data);
@@ -928,7 +940,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>,
         let new_meta_phaseblock = merge_phaseblocks(meta_block1, 
             meta_block2, 
             &phase_block_pair_phasing.phase_pairing, 
-            cluster_centers, &mut largest_id_so_far, &mut allele_phase_block_id);
+            cluster_centers, &mut allele_phase_block_id);
         
         // remove both from meta_phaseblock_map
         meta_phaseblock_map.remove(&phase_block_pair_phasing.id1);
@@ -1135,16 +1147,20 @@ impl AllelePairCounts {
 fn merge_phaseblocks(phaseblock1: &MetaPhaseBlock, 
     phaseblock2: &MetaPhaseBlock, 
     best_pairing: &Vec<(usize, usize)>, 
-    cluster_centers: &mut Vec<Vec<f32>>, largest_id_so_far: &mut usize, 
+    cluster_centers: &mut Vec<Vec<f32>>,  
     allele_phase_block_id: &mut HashMap<usize, usize>) -> MetaPhaseBlock {
-    *largest_id_so_far += 1;
     let mut to_return: MetaPhaseBlock = MetaPhaseBlock { 
-        id: *largest_id_so_far, phase_blocks: Vec::new() 
+        id: 0, phase_blocks: Vec::new() // set id later
     };
-    for pb in phaseblock1.phase_blocks.iter() {
+    let mut first_phaseblock_start = 0;
+    for (index, pb) in phaseblock1.phase_blocks.iter().enumerate() {
+        if index == 0 {
+            first_phaseblock_start = pb.start_position;
+            to_return.id = first_phaseblock_start;
+        }
         to_return.phase_blocks.push(*pb);
         for allele_id in pb.start_index..(pb.end_index+1) {
-            allele_phase_block_id.insert(allele_id, to_return.id);
+            allele_phase_block_id.insert(allele_id, first_phaseblock_start);
         }
     }
     for pb in phaseblock2.phase_blocks.iter() {
