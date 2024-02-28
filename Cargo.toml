@@ -20,3 +20,4 @@ petgraph = "*"
 sanitize-filename = "*"
 log = "*"
 env_logger = "*"
+pprof = { version = "0.13", features = ["flamegraph"] }

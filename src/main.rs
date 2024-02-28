@@ -11,6 +11,7 @@ extern crate petgraph;
 extern crate sanitize_filename;
 extern crate log;
 extern crate env_logger;
+extern crate pprof;
 
 use log::{debug, error, log_enabled, info, trace, Level};
 
@@ -66,7 +67,13 @@ const GAP_EXTEND: i32 = -2; // Gap extend score
 
 fn main() {
     env_logger::init();
+    let guard = pprof::ProfilerGuard::new(100).unwrap();
+
     let result = _main();
+    if let Ok(report) = guard.report().build() {
+        let file = File::create("flamegraph.svg").unwrap();
+        report.flamegraph(file).unwrap();
+    };
     if let Err(v) = result {
         let fail = v.as_fail();
         println!("Phasstphase error. v{}.", env!("CARGO_PKG_VERSION"));
@@ -151,6 +158,7 @@ fn _main() -> Result<(), Error> {
         };
         chunks.push(data);
     }
+    println!("{} chromosome chunks and {} threads",chunks.len(), params.threads);
     //let pool = rayon::ThreadPoolBuilder::new()
     //    .num_threads(params.threads)
     //    .build()
@@ -184,6 +192,7 @@ fn _main() -> Result<(), Error> {
     println!("before barrier");
     assert_eq!(rx.iter().take(jobs).fold(0,|a,b|a+b),jobs);
     println!("after barrier");
+    println!("merging final vcf");
     let result = Command::new("bcftools")
         .args(&cmd)
         .status()
@@ -606,16 +615,16 @@ fn test_long_switch(start_index: usize, end_index: usize,
     cluster_centers: &mut Vec<Vec<f32>>, vcf_info: &VCF_info, 
     vcf_reader: &mut bcf::IndexedReader, data: &ThreadData) -> Vec<PhaseBlock> {
     let mut to_return: Vec<PhaseBlock> = Vec::new();
-    /*
+    if data.ploidy > 2 {
     to_return.push(PhaseBlock{
         start_index: start_index,
         start_position: vcf_info.variant_positions[start_index],
-        end_index: end_index,
+        end_index: end_index + 1,
         end_position: vcf_info.variant_positions[end_index],
         id: 0,
     });
-    return to_return; /// TODODODODODOD short circuiting for debug only
-    */
+    return to_return; // currently not doing test_long_switch for polyploid
+    }
 
 
 
@@ -626,17 +635,36 @@ fn test_long_switch(start_index: usize, end_index: usize,
         .name2rid(data.chrom.as_bytes())
         .expect("can't get chrom rid, make sure vcf and bam and fasta contigs match!");
     let mut phase_block_start = start_index;
-
-
+    let mut cluster_center_copies: Vec<Vec<Vec<f32>>> = Vec::new(); // pairings by cluster center copies
+    for pairing in pairings.iter() {
+        cluster_center_copies.push(swap_full(&cluster_centers, &pairing));
+    }
+    let one_million: usize = 1000000;
+    let mut which_million: usize = vcf_info.variant_positions[start_index] / one_million;
+    // TODO REALLY THIS TIME URGENT -- if we cut a phaseblock, we need to only test going forward, not read back into old phaseblock
+    let mut min_position: u64 = vcf_info.variant_positions[start_index] as u64;
     for breakpoint in start_index..end_index {
+        
         let mut log_likelihoods: Vec<f32> = Vec::new();
         let position = vcf_info.variant_positions[breakpoint];
+        /*
+        if position / one_million > which_million {
+            println!("{}", position);
+            println!("{} > {} == {}", position / one_million, which_million, position / one_million > which_million);
+            which_million = position / one_million;
+            println!(" which million is now {}", which_million);
+        } 
+        */
+        let vcf_fetch_start = (position as u64).checked_sub(15000).unwrap_or(0).max(min_position); // so position - 15000 but not going negative or lower than min_position
+        let vcf_fetch_end = Some(position as u64 + 15000); 
         vcf_reader
-            .fetch(chrom, (position as u64).checked_sub(15000).unwrap_or(0), Some(position as u64 + 15000)) // TODO dont hard code things
+            .fetch(chrom, vcf_fetch_start, vcf_fetch_end) // TODO dont hard code things
             .expect("could not fetch in vcf");
         let (molecules, first_var_index, last_var_index) = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
-        for pairing in pairings.iter() {
-            swap(cluster_centers, breakpoint, &pairing, 50);
+        for (index, pairing) in pairings.iter().enumerate() {
+            // TODO just deleted this, but might need it back
+            //swap(cluster_centers, breakpoint, &pairing, 50);
+            swap_copied(&mut cluster_center_copies[index], breakpoint, &pairing);
             let mut posteriors: Vec<Vec<f32>> = Vec::new();
             for moldex in molecules.iter() {
                 let mut post: Vec<f32> = Vec::new();
@@ -645,9 +673,10 @@ fn test_long_switch(start_index: usize, end_index: usize,
                 }
                 posteriors.push(post);
             }
-            let (_break, log_likelihood, post_delta) = expectation(&molecules, &cluster_centers, &mut posteriors);
+            let (_break, log_likelihood, post_delta) = expectation(&molecules, &cluster_center_copies[index], &mut posteriors);
             log_likelihoods.push(log_likelihood + log_prior);
-            swap(cluster_centers, breakpoint, &pairing, 50); // reversing the swap
+            // TODO just deleted this, if we screwed up we might need it back
+            //swap(cluster_centers, breakpoint, &pairing, 50); // reversing the swap
         }
         let log_bayes_denom = log_sum_exp(&log_likelihoods);
         let log_posterior = log_likelihoods[0] - log_bayes_denom;
@@ -658,17 +687,20 @@ fn test_long_switch(start_index: usize, end_index: usize,
                 id: to_return.len(),
                 start_index: phase_block_start,
                 start_position: vcf_info.variant_positions[phase_block_start],
-                end_index: breakpoint,
+                end_index: breakpoint+1,
                 end_position: vcf_info.variant_positions[breakpoint],
             });
+            if breakpoint < end_index {
+                min_position = vcf_info.variant_positions[breakpoint + 1] as u64;
+            }
             phase_block_start = breakpoint + 1;
             let start_position = vcf_info.variant_positions[start_index];
             let end_position = vcf_info.variant_positions[end_index];
             let position = vcf_info.variant_positions[breakpoint];
-            vcf_reader
-                .fetch(chrom, (position as u64).checked_sub(15000).unwrap_or(0), Some(position as u64))
-                .expect("could not fetch in vcf");
-                let (molecules, first_var_index, last_var_index)  = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
+            //vcf_reader
+            //    .fetch(chrom, (position as u64).checked_sub(15000).unwrap_or(0), Some(position as u64))
+            //    .expect("could not fetch in vcf");
+            //let (molecules, first_var_index, last_var_index)  = get_read_molecules(vcf_reader, &vcf_info, READ_TYPE::HIFI);
             trace!("HIT POTENTIAL LONG SWITCH ERROR. phase block from indexes {}-{}, positions {}-{}, posterior {}, breakpoint {} position {} with {} molecules", 
                 start_index, end_index, start_position, end_position, posterior, breakpoint, position, molecules.len());
             let mut posteriors: Vec<Vec<f32>> = Vec::new();
@@ -682,8 +714,8 @@ fn test_long_switch(start_index: usize, end_index: usize,
             let (_break, log_likelihood, post_delta) = expectation(&molecules, &cluster_centers, &mut posteriors);
             //eprintln!("mol posteriors {:?}", posteriors);
 
-            trace!("hap1 {:?}", &cluster_centers[0][breakpoint..(breakpoint+10)]);
-            trace!("hap2 {:?}", &cluster_centers[1][breakpoint..(breakpoint+10)]);
+            //trace!("hap1 {:?}", &cluster_centers[0][breakpoint..(breakpoint+10)]);
+            //trace!("hap2 {:?}", &cluster_centers[1][breakpoint..(breakpoint+10)]);
         
         }
         /*** else {
@@ -704,7 +736,7 @@ fn test_long_switch(start_index: usize, end_index: usize,
                 id: to_return.len(),
                 start_index: start_index,
                 start_position: vcf_info.variant_positions[start_index],
-                end_index: end_index,
+                end_index: end_index+1,
                 end_position: vcf_info.variant_positions[end_index]});
         }
     } else if to_return[to_return.len()-1].end_index != end_index {
@@ -712,11 +744,39 @@ fn test_long_switch(start_index: usize, end_index: usize,
             id: to_return.len(),
             start_index: phase_block_start,
             start_position: vcf_info.variant_positions[phase_block_start],
-            end_index: end_index,
+            end_index: end_index+1,
             end_position: vcf_info.variant_positions[end_index],
         });
     }
     to_return
+}
+
+fn swap_copied(cluster_centers_copy: &mut Vec<Vec<f32>>, breakpoint: usize, pairing: &Vec<(usize, usize)>) {
+    let mut touched = [false;32];
+    for (hap1, hap2) in pairing {
+        if touched[*hap1] {continue;}
+        touched[*hap1] = true;
+        touched[*hap2] = true;
+        let tmp = cluster_centers_copy[*hap1][breakpoint];
+        cluster_centers_copy[*hap1][breakpoint] = cluster_centers_copy[*hap2][breakpoint];
+        cluster_centers_copy[*hap2][breakpoint] = tmp;
+    }
+}
+
+fn swap_full(cluster_centers: &Vec<Vec<f32>>, pairing: &Vec<(usize, usize)>) -> Vec<Vec<f32>> {
+    let mut cluster_centers_copy = cluster_centers.clone();
+    let mut touched = [false;32];
+    for (hap1, hap2) in pairing {
+        if touched[*hap1]  { continue; }
+        touched[*hap1] = true;
+        touched[*hap2] = true;
+        for i in 0..cluster_centers[0].len() {
+            let tmp = cluster_centers[*hap1][i];
+            cluster_centers_copy[*hap1][i] = cluster_centers[*hap2][i];
+            cluster_centers_copy[*hap2][i] = tmp;            
+        }
+    }
+    cluster_centers_copy
 }
 
 fn swap(cluster_centers: &mut Vec<Vec<f32>>, breakpoint: usize, pairing: &Vec<(usize, usize)>, length: usize) {
@@ -745,6 +805,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>,
         .name2rid(data.chrom.as_bytes())
         .expect("cant get chrom rid");
     let mut allele_phase_block_id: HashMap<usize, usize> = HashMap::new();
+    
     match &data.hic_bam {
         Some(hic) => {}, // if has hic continue as normal
         None => {
@@ -753,6 +814,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>,
                     allele_phase_block_id.insert(allele_id, pb.start_position); 
                 }    
             }
+            return allele_phase_block_id;
         }
     }
     let vcf_info: VCF_info = inspect_vcf(&mut vcf_reader, &data);
@@ -891,13 +953,14 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>,
     let mut meta_phaseblock_map: HashMap<usize, MetaPhaseBlock> = HashMap::new();
     let mut first_phaseblock_start = 0;
     for (index, pb) in phase_blocks.iter().enumerate() {
-        if index == 0 {
-            first_phaseblock_start = pb.start_position;
-        }
-        meta_phaseblocks.push(MetaPhaseBlock { id: pb.id, phase_blocks: vec![*pb] });
-        meta_phaseblock_map.insert(index, MetaPhaseBlock { id: pb.id, phase_blocks: vec![*pb] });
+        // TODO changes that im not sure about
+        //if index == 0 {
+        //    first_phaseblock_start = pb.start_position;
+        //}
+        meta_phaseblocks.push(MetaPhaseBlock { id: pb.start_position, phase_blocks: vec![*pb] });// pb.id, phase_blocks: vec![*pb] });
+        meta_phaseblock_map.insert(index, MetaPhaseBlock { id: pb.start_position, phase_blocks: vec![*pb]});//pb.id, phase_blocks: vec![*pb] });
         for allele_id in pb.start_index..pb.end_index { 
-            allele_phase_block_id.insert(allele_id, first_phaseblock_start); 
+            allele_phase_block_id.insert(allele_id, pb.start_position);//first_phaseblock_start); 
         }
     }
     let mut pairwise_posteriors_heap = 
@@ -958,7 +1021,7 @@ fn phase_phaseblocks(data: &ThreadData, cluster_centers: &mut Vec<Vec<f32>>,
         
     }
     
-
+    
     
     println!("done with hic");
     return allele_phase_block_id;
@@ -1346,8 +1409,10 @@ fn output_phased_vcf(
         copy_vcf_record(&mut new_rec, &rec);
         //println!("{}",index);
         match allele_phase_block_id.get(&index) {
-            Some(id) => new_rec.push_format_integer(b"PS", &[*id as i32]).expect("you did it again, pushing your problems down to future you"),
-            None => (),
+            Some(id) => {
+                new_rec.push_format_integer(b"PS", &[*id as i32]).expect("you did it again, pushing your problems down to future you");
+            },
+            None => {eprintln!("no PS for index {}",index); },
         }
         let mut cluster_center: Vec<f32> = Vec::new();
         for h in 0..cluster_centers.len() {
@@ -1568,6 +1633,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
 
     {
         // creating my own scope to close later to close vcf writer
+        eprintln!("writing vcf {} using {} as header template",data.vcf_out.to_string(), data.vcf.to_string());
         let mut vcf_writer =
             bcf::Writer::from_path(data.vcf_out.to_string(), &new_header, false, Format::Vcf).expect("cant open vcf writer");
         let chrom = vcf_reader.header().name2rid(data.chrom.as_bytes()).expect("could not read vcf header");
@@ -1866,11 +1932,13 @@ fn get_read_assignments(
         .expect(&format!("cannot find chrom tid {}", chrom));
     bam.fetch((tid, pos as u32, (pos + 1) as u32))
         .expect("blah"); // skip to region of bam of this variant position
-    let ref_start = (pos - window) as u64;
-    let ref_end = (pos + window + ref_allele.len()) as u64;
+    let ref_start = (pos.checked_sub(window)).unwrap_or(0) as u64;
+    let ref_end = (pos.checked_add(window).unwrap_or(pos).checked_add(ref_allele.len())).unwrap_or(pos) as u64;
     let padding = 15;
-    let ref_start_padded = ref_start - padding;// TODO dont hard code
-    let ref_end_padded = ref_end + padding; // TODO dont hard code
+    let ref_start_padded = ref_start.checked_sub(padding).unwrap_or(0);// TODO dont hard code
+    let ref_end_padded = ref_end.checked_add(padding).unwrap_or(ref_end); // TODO dont hard code
+    //eprintln!("padded {}-{}",ref_start_padded,ref_end_padded);
+    
     fasta
         .fetch(&chrom, ref_start_padded, ref_end_padded)
         .expect("fasta fetch failed");
