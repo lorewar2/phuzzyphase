@@ -1566,7 +1566,7 @@ fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
         .header()
         .name2rid(data.chrom.as_bytes())
         .expect("cant get chrom rid");
-    println!("chromosone read correctly {}", chrom);
+    //println!("chromosone read correctly {}", chrom);
     let mut genotypes: Vec<Vec<GenotypeAllele>> = Vec::new();
     vcf.fetch(chrom, 0, None).expect("could not fetch in vcf");
     
@@ -1582,7 +1582,7 @@ fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
         variant_positions.push(rec.pos() as usize);
         position_to_index.insert(rec.pos() as usize, num);
         num += 1;
-        println!("locations processing {}", last_pos);
+        //println!("locations processing {}", last_pos);
     }
     println!("vcf has {} variants for chrom {}", num, chrom);
     VCF_info {
@@ -1663,7 +1663,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
 
                     let genotypes = rec.genotypes().expect("cant get genotypes");
                     let genotype = genotypes.get(0); // assume only 1 and get the first one
-                    println!("{} {} {}", reference, alternative, genotypes.get(0));
+                    //println!("{} {} {}", reference, alternative, genotypes.get(0));
                     if is_heterozygous(genotype) {
                         hets += 1;
                         get_variant_assignments(
@@ -2102,30 +2102,6 @@ fn pretty_print(aln: &bio::alignment::Alignment, x: &Vec<u8>, y: &Vec<u8>) {
 }
 
 fn is_heterozygous(gt: bcf::record::Genotype) -> bool {
-    if gt[0] == bcf::record::GenotypeAllele::Unphased(0) {
-        println!("gt[0] unphased 0");
-    }
-    if gt[0] == bcf::record::GenotypeAllele::Unphased(1) {
-        println!("gt[0] unphased 1");
-    }
-    if gt[0] == bcf::record::GenotypeAllele::Phased(0) {
-        println!("gt[0] phased 0");
-    }
-    if gt[0] == bcf::record::GenotypeAllele::Phased(1) {
-        println!("gt[0] phased 1");
-    }
-    if gt[1] == bcf::record::GenotypeAllele::Unphased(0) {
-        println!("gt[1] unphased 0");
-    }
-    if gt[1] == bcf::record::GenotypeAllele::Unphased(1) {
-        println!("gt[1] unphased 1");
-    }
-    if gt[1] == bcf::record::GenotypeAllele::Phased(0) {
-        println!("gt[1] phased 0");
-    }
-    if gt[1] == bcf::record::GenotypeAllele::Phased(1) {
-        println!("gt[1] phased 1");
-    }
     if gt[0] == bcf::record::GenotypeAllele::Unphased(0)
         && gt[1] == bcf::record::GenotypeAllele::Unphased(1)
     {
