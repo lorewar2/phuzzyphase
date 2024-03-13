@@ -2101,6 +2101,30 @@ fn pretty_print(aln: &bio::alignment::Alignment, x: &Vec<u8>, y: &Vec<u8>) {
 }
 
 fn is_heterozygous(gt: bcf::record::Genotype) -> bool {
+    if gt[0] == bcf::record::GenotypeAllele::Unphased(0) {
+        println!("gt[0] unphased 0");
+    }
+    if gt[0] == bcf::record::GenotypeAllele::Unphased(1) {
+        println!("gt[0] unphased 1");
+    }
+    if gt[0] == bcf::record::GenotypeAllele::Phased(0) {
+        println!("gt[0] phased 0");
+    }
+    if gt[0] == bcf::record::GenotypeAllele::Phased(1) {
+        println!("gt[0] phased 1");
+    }
+    if gt[1] == bcf::record::GenotypeAllele::Unphased(0) {
+        println!("gt[1] unphased 0");
+    }
+    if gt[1] == bcf::record::GenotypeAllele::Unphased(1) {
+        println!("gt[1] unphased 1");
+    }
+    if gt[1] == bcf::record::GenotypeAllele::Phased(0) {
+        println!("gt[1] phased 0");
+    }
+    if gt[1] == bcf::record::GenotypeAllele::Phased(1) {
+        println!("gt[1] phased 1");
+    }
     if gt[0] == bcf::record::GenotypeAllele::Unphased(0)
         && gt[1] == bcf::record::GenotypeAllele::Unphased(1)
     {
