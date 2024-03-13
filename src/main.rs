@@ -1535,7 +1535,7 @@ fn get_read_molecules(vcf: &mut bcf::IndexedReader, vcf_info: &VCF_info, read_ty
     }
     let mut to_return: Vec<Vec<Allele>> = Vec::new();
     for (index, (_read_name, alleles)) in molecules.iter().enumerate() {
-        if alleles.len() < 2 {
+        if alleles.len() < 3 {
             continue;
         }
         let mut mol: Vec<Allele> = Vec::new();
@@ -1654,7 +1654,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
                     let alleles = rec.alleles();
                     let mut new_rec = vcf_writer.empty_record();
                     copy_vcf_record(&mut new_rec, &rec);
-                    if alleles.len() > 2 {
+                    if alleles.len() != 3 {
                         continue; // ignore multi allelic sites
                     }
                     let reference = std::str::from_utf8(alleles[0]).expect("this really shouldnt fail");
