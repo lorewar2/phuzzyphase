@@ -1663,6 +1663,7 @@ fn get_all_variant_assignments(data: &ThreadData) -> Result<(), Error> {
 
                     let genotypes = rec.genotypes().expect("cant get genotypes");
                     let genotype = genotypes.get(0); // assume only 1 and get the first one
+                    println!("{} {} {}", reference, alternative, genotypes.get(0));
                     if is_heterozygous(genotype) {
                         hets += 1;
                         get_variant_assignments(
