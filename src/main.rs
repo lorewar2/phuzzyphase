@@ -356,6 +356,7 @@ fn log_sum_exp64(p: &Vec<f64>) -> f64 {
     let sum_rst: f64 = p.iter().map(|x| (x - max_p).exp()).sum();
     max_p + sum_rst.ln()
 }
+// this is where the vcf file is read
 fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
     println!("checking for file {}", data.phased_vcf_done);
     if Path::new(&data.phased_vcf_done).exists() {
@@ -373,6 +374,7 @@ fn phase_chunk(data: &ThreadData) -> Result<(), Error> {
         .header()
         .name2rid(data.chrom.as_bytes())
         .expect("can't get chrom rid, make sure vcf and bam and fasta contigs match!");
+    println!("read chromosone correctly {}", chrom);
     let vcf_info = inspect_vcf(&mut vcf_reader, &data);
     let (mut cluster_centers, mut molecule_support) =  init_cluster_centers(vcf_info.num_variants, &data);
     let mut window_start: usize = data.start;
@@ -1564,8 +1566,10 @@ fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
         .header()
         .name2rid(data.chrom.as_bytes())
         .expect("cant get chrom rid");
+    println!("chromosone read correctly {}", chrom);
     let mut genotypes: Vec<Vec<GenotypeAllele>> = Vec::new();
     vcf.fetch(chrom, 0, None).expect("could not fetch in vcf");
+    
     let mut position_to_index: HashMap<usize, usize> = HashMap::new();
     let mut num = 0;
     let mut last_pos = 0;
@@ -1578,6 +1582,7 @@ fn inspect_vcf(vcf: &mut bcf::IndexedReader, data: &ThreadData) -> VCF_info {
         variant_positions.push(rec.pos() as usize);
         position_to_index.insert(rec.pos() as usize, num);
         num += 1;
+        println!("locations processing {}", last_pos);
     }
     println!("vcf has {} variants for chrom {}", num, chrom);
     VCF_info {
