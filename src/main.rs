@@ -1713,8 +1713,10 @@ fn copy_vcf_record(new_rec: &mut bcf::record::Record, rec: &bcf::record::Record)
     for filter in rec.filters() {
         new_rec.push_filter(&filter).expect("push filter failed");
     }
+    let mut alleles = rec.alleles();
+    alleles.pop();
     new_rec
-        .set_alleles(&rec.alleles())
+        .set_alleles(&alleles)
         .expect("could not write alleles to new record???");
     new_rec.set_qual(rec.qual());
     let header = rec.header();
